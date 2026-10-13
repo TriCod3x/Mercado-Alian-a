@@ -1,20 +1,22 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { openDb } = require('../server/db');
+const { createTestDb } = require('./support/testdb');
 const { createApp } = require('../server/app');
 const { hashPassword } = require('../server/auth');
 
 const BRT = '-03:00';
 let clock = Date.parse(`2026-10-10T12:00:00${BRT}`);
 
-async function boot() {
-  const db = openDb(':memory:');
-  const add = db.prepare('INSERT INTO users(name, username, pass_hash, role, created_at) VALUES (?,?,?,?,?)');
-  add.run('Dono', 'dono', hashPassword('senha-do-dono'), 'dono', 0);
+async function boot(t) {
+  const db = await createTestDb();
+  await db.query('INSERT INTO users(name, username, pass_hash, role, created_at) VALUES ($1,$2,$3,$4,$5)',
+    ['Dono', 'dono', hashPassword('senha-do-dono'), 'dono', new Date(0)]);
   const app = createApp({ db, now: () => clock });
   const server = await new Promise(r => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
   const base = `http://127.0.0.1:${server.address().port}`;
+  // Fecha o servidor HTTP antes do banco.
+  if (t) t.after(async () => { await new Promise(r => server.close(r)); await db.close(); });
   return { db, server, base };
 }
 
@@ -44,8 +46,7 @@ const product = (over = {}) => ({
 });
 
 test('fluxo completo: venda, baixa, lucro, cancelamento', async t => {
-  const { server, base } = await boot();
-  t.after(() => server.close());
+  const { base } = await boot(t);
   const dono = client(base);
   assert.equal((await dono('GET', '/api/me')).status, 401);
   assert.equal((await dono.login('dono', 'errada')).status, 401);
@@ -92,8 +93,7 @@ test('fluxo completo: venda, baixa, lucro, cancelamento', async t => {
 });
 
 test('regras de quantidade, estoque e desconto', async t => {
-  const { server, base } = await boot();
-  t.after(() => server.close());
+  const { base } = await boot(t);
   const c = client(base);
   await c.login('dono', 'senha-do-dono');
   const un = (await c('POST', '/api/products', product({ name: 'Arroz', stock: 3 }))).data;
@@ -125,8 +125,7 @@ test('regras de quantidade, estoque e desconto', async t => {
 });
 
 test('desconto é rateado sem perder centavo', async t => {
-  const { server, base } = await boot();
-  t.after(() => server.close());
+  const { base } = await boot(t);
   const c = client(base);
   await c.login('dono', 'senha-do-dono');
   const a = (await c('POST', '/api/products', product({ name: 'A', price: 333, cost: 100 }))).data;
@@ -146,8 +145,7 @@ test('desconto é rateado sem perder centavo', async t => {
 });
 
 test('request_id evita venda duplicada em reenvio', async t => {
-  const { server, base } = await boot();
-  t.after(() => server.close());
+  const { base } = await boot(t);
   const c = client(base);
   await c.login('dono', 'senha-do-dono');
   const p = (await c('POST', '/api/products', product({ stock: 5 }))).data;
@@ -162,8 +160,7 @@ test('request_id evita venda duplicada em reenvio', async t => {
 });
 
 test('duas vendas simultâneas da última unidade: só uma passa', async t => {
-  const { server, base } = await boot();
-  t.after(() => server.close());
+  const { base } = await boot(t);
   const c = client(base);
   await c.login('dono', 'senha-do-dono');
   const p = (await c('POST', '/api/products', product({ stock: 1 }))).data;
@@ -174,8 +171,7 @@ test('duas vendas simultâneas da última unidade: só uma passa', async t => {
 });
 
 test('virada de mês respeita o fuso de Fortaleza', async t => {
-  const { server, base } = await boot();
-  t.after(() => server.close());
+  const { base } = await boot(t);
   const c = client(base);
   await c.login('dono', 'senha-do-dono');
   const p = (await c('POST', '/api/products', product({ stock: 10 }))).data;
@@ -192,8 +188,7 @@ test('virada de mês respeita o fuso de Fortaleza', async t => {
 });
 
 test('caixa: permissões e dados sensíveis', async t => {
-  const { server, base } = await boot();
-  t.after(() => server.close());
+  const { base } = await boot(t);
   const dono = client(base);
   await dono.login('dono', 'senha-do-dono');
   const p = (await dono('POST', '/api/products', product())).data;
@@ -239,8 +234,7 @@ test('caixa: permissões e dados sensíveis', async t => {
 });
 
 test('bloqueio após tentativas de login erradas', async t => {
-  const { server, base } = await boot();
-  t.after(() => server.close());
+  const { base } = await boot(t);
   const c = client(base);
   for (let i = 0; i < 5; i++) assert.equal((await c.login('dono', 'x' + i)).status, 401);
   assert.equal((await c.login('dono', 'senha-do-dono')).status, 429);
@@ -249,8 +243,7 @@ test('bloqueio após tentativas de login erradas', async t => {
 });
 
 test('sessão expira e troca de senha', async t => {
-  const { server, base } = await boot();
-  t.after(() => server.close());
+  const { base } = await boot(t);
   const c = client(base);
   await c.login('dono', 'senha-do-dono');
   assert.equal((await c('POST', '/api/me/password', { current: 'errada', next: 'nova-senha-123' })).status, 400);
@@ -265,8 +258,7 @@ test('sessão expira e troca de senha', async t => {
 });
 
 test('produtos: edição, entrada, código único, exclusão e categorias', async t => {
-  const { server, base } = await boot();
-  t.after(() => server.close());
+  const { base } = await boot(t);
   const c = client(base);
   await c.login('dono', 'senha-do-dono');
   const a = (await c('POST', '/api/products', product({ code: '789' }))).data;
@@ -303,8 +295,7 @@ test('produtos: edição, entrada, código único, exclusão e categorias', asyn
 });
 
 test('backup, CSV e validações de entrada', async t => {
-  const { server, base } = await boot();
-  t.after(() => server.close());
+  const { base } = await boot(t);
   const c = client(base);
   await c.login('dono', 'senha-do-dono');
   const p = (await c('POST', '/api/products', product({ name: 'Item; "aspas"' }))).data;
@@ -333,4 +324,127 @@ test('backup, CSV e validações de entrada', async t => {
     body: JSON.stringify({ username: 'dono', password: 'senha-do-dono' }),
   });
   assert.equal(evil.status, 403);
+});
+
+test('logout encerra a sessão no servidor', async t => {
+  const { base } = await boot(t);
+  const c = client(base);
+  await c.login('dono', 'senha-do-dono');
+  const sid = c.sid();
+  assert.equal((await c('POST', '/api/logout')).status, 200);
+  const reused = await fetch(`${base}/api/me`, { headers: { Cookie: `sid=${sid}` } });
+  assert.equal(reused.status, 401, 'token antigo não vale mais');
+});
+
+test('estoque: ajuste na edição e entrada ficam no histórico; custo = último preço de compra', async t => {
+  const { base } = await boot(t);
+  const c = client(base);
+  await c.login('dono', 'senha-do-dono');
+  const p = (await c('POST', '/api/products', product({ stock: 10 }))).data;
+  await c('PUT', `/api/products/${p.id}`, product({ stock: 7 }));
+  const re = await c('POST', `/api/products/${p.id}/restock`, { qty: 5 }); // sem custo: mantém o atual
+  assert.equal(re.data.cost, 1250);
+  const re2 = await c('POST', `/api/products/${p.id}/restock`, { qty: 1, cost: 1400 });
+  assert.equal(re2.data.cost, 1400);
+  assert.equal(re2.data.stock, 13);
+  const mov = (await c('GET', `/api/products/${p.id}/movements`)).data.movements;
+  assert.deepEqual(mov.map(m => [m.type, m.qty]), [['entrada', 1], ['entrada', 5], ['ajuste', -3], ['inicial', 10]]);
+  assert.ok(mov.every(m => typeof m.at === 'number' && m.user === 'Dono'));
+  // soma do histórico = estoque atual
+  assert.equal(mov.reduce((s, m) => s + m.qty, 0), 13);
+  assert.equal((await c('POST', `/api/products/${p.id}/restock`, { qty: 1, cost: -5 })).status, 400);
+  assert.equal((await c('GET', '/api/products/abc/movements')).status, 404);
+  assert.equal((await c('POST', '/api/sales/abc/cancel', {})).status, 404);
+});
+
+test('caixa só vê as próprias vendas do dia', async t => {
+  const { base } = await boot(t);
+  const dono = client(base);
+  await dono.login('dono', 'senha-do-dono');
+  const p = (await dono('POST', '/api/products', product({ stock: 10 }))).data;
+  await dono('POST', '/api/users', { name: 'Ana', username: 'ana', password: 'senha-da-ana', role: 'caixa' });
+  const ana = client(base);
+  await ana.login('ana', 'senha-da-ana');
+  const sell = c => c('POST', '/api/sales', { items: [{ product_id: p.id, qty: 1 }], payment: 'pix' });
+  clock = Date.parse(`2026-10-09T12:00:00${BRT}`);
+  await sell(ana); // ontem
+  clock = Date.parse(`2026-10-10T12:00:00${BRT}`);
+  await sell(ana);
+  await sell(dono);
+  const mine = (await ana('GET', '/api/sales?month=2026-09')).data; // mês é ignorado para o caixa
+  assert.equal(mine.length, 1);
+  assert.equal(mine[0].user, 'Ana');
+  assert.equal((await dono('GET', '/api/sales?month=2026-10')).data.length, 3);
+});
+
+test('mesma venda reenviada ao mesmo tempo: grava uma só vez', async t => {
+  const { base } = await boot(t);
+  const c = client(base);
+  await c.login('dono', 'senha-do-dono');
+  const p = (await c('POST', '/api/products', product({ stock: 5 }))).data;
+  const body = { items: [{ product_id: p.id, qty: 1 }], payment: 'pix', request_id: 'mesma-venda' };
+  const res = await Promise.all([1, 2, 3, 4].map(() => c('POST', '/api/sales', body)));
+  assert.deepEqual(res.map(r => r.status).sort(), [200, 200, 200, 201]);
+  assert.equal(new Set(res.map(r => r.data.sale.id)).size, 1);
+  assert.equal((await c('GET', '/api/products')).data[0].stock, 4);
+});
+
+test('vários caixas ao mesmo tempo: estoque e numeração consistentes', async t => {
+  const { base } = await boot(t);
+  const dono = client(base);
+  await dono.login('dono', 'senha-do-dono');
+  const a = (await dono('POST', '/api/products', product({ name: 'A', stock: 6 }))).data;
+  const b = (await dono('POST', '/api/products', product({ name: 'B', stock: 6 }))).data;
+  const caixas = [];
+  for (const u of ['cx1', 'cx2', 'cx3']) {
+    await dono('POST', '/api/users', { name: u, username: u, password: 'senha-forte-1', role: 'caixa' });
+    const c = client(base);
+    await c.login(u, 'senha-forte-1');
+    caixas.push(c);
+  }
+  // ordens invertidas de itens para provocar deadlock se as travas não forem ordenadas
+  const jobs = [];
+  for (let i = 0; i < 12; i++) {
+    const items = i % 2 ? [{ product_id: a.id, qty: 1 }, { product_id: b.id, qty: 1 }] : [{ product_id: b.id, qty: 1 }, { product_id: a.id, qty: 1 }];
+    jobs.push(caixas[i % 3]('POST', '/api/sales', { items, payment: 'pix' }));
+  }
+  jobs.push(dono('POST', `/api/products/${a.id}/restock`, { qty: 0 + 2 }));
+  const res = await Promise.all(jobs);
+  const sales = res.slice(0, 12);
+  const ok = sales.filter(r => r.status === 201);
+  assert.ok(sales.every(r => r.status === 201 || r.status === 409), sales.map(r => r.status).join());
+  assert.equal(ok.length, 6, 'B só tem 6: exatamente 6 vendas passam');
+  assert.deepEqual(ok.map(r => r.data.sale.number).sort((x, y) => x - y), [1, 2, 3, 4, 5, 6], 'numeração sem buracos nem repetição');
+  const prods = (await dono('GET', '/api/products')).data;
+  assert.equal(prods.find(p => p.id === a.id).stock, 2);
+  assert.equal(prods.find(p => p.id === b.id).stock, 0);
+  for (const p of [a, b]) {
+    const mov = (await dono('GET', `/api/products/${p.id}/movements`)).data.movements;
+    assert.equal(mov.reduce((s, m) => s + m.qty, 0), prods.find(x => x.id === p.id).stock, 'histórico bate com o estoque');
+  }
+});
+
+test('cancelamento simultâneo da mesma venda devolve o estoque uma vez só', async t => {
+  const { base } = await boot(t);
+  const c = client(base);
+  await c.login('dono', 'senha-do-dono');
+  const p = (await c('POST', '/api/products', product({ stock: 5 }))).data;
+  const s = (await c('POST', '/api/sales', { items: [{ product_id: p.id, qty: 3 }], discount: 500, payment: 'pix' })).data.sale;
+  const res = await Promise.all([1, 2, 3].map(() => c('POST', `/api/sales/${s.id}/cancel`, { reason: 'cliente desistiu' })));
+  assert.deepEqual(res.map(r => r.status).sort(), [200, 409, 409]);
+  const done = res.find(r => r.status === 200).data;
+  assert.equal(done.status, 'cancelada');
+  assert.equal(done.cancel_reason, 'cliente desistiu');
+  assert.equal((await c('GET', '/api/products')).data[0].stock, 5);
+  const rep = (await c('GET', '/api/reports/month?month=2026-10')).data;
+  assert.equal(rep.kpis.revenue, 0);
+  assert.equal(rep.kpis.count, 0);
+});
+
+test('categoria criada duas vezes ao mesmo tempo: uma passa, outra 409', async t => {
+  const { base } = await boot(t);
+  const c = client(base);
+  await c.login('dono', 'senha-do-dono');
+  const res = await Promise.all([c('POST', '/api/categories', { name: 'Pet' }), c('POST', '/api/categories', { name: 'PET' })]);
+  assert.deepEqual(res.map(r => r.status).sort(), [201, 409]);
 });

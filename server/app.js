@@ -1,17 +1,18 @@
 'use strict';
 const express = require('express');
-const fs = require('fs');
-const os = require('os');
-const path = require('path');
 const {
   hashPassword, verifyPassword, DUMMY_HASH, newToken, hashToken, parseCookies,
 } = require('./auth');
+const { dumpDataset } = require('./dataset');
 
 const SESSION_MS = 12 * 60 * 60 * 1000;
 const TOUCH_MS = 5 * 60 * 1000;
 const PAYMENTS = ['dinheiro', 'pix', 'debito', 'credito'];
 const MAX_FAILS = 5;
 const LOCK_MS = 5 * 60 * 1000;
+// Trava (advisory lock) que enfileira vendas e cancelamentos: garante número de
+// venda sequencial sem buracos e request_id sem corrida, como o BEGIN IMMEDIATE do SQLite.
+const SALES_LOCK = 7428001;
 
 class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -19,6 +20,17 @@ class HttpError extends Error {
 const bad = m => new HttpError(400, m);
 const isCents = v => Number.isSafeInteger(v) && v >= 0;
 const str = (v, max) => String(v == null ? '' : v).trim().slice(0, max);
+// ID de rota inválido vira 0 (não existe) em vez de erro de tipo no Postgres.
+const idOf = v => { const n = Number(v); return Number.isSafeInteger(n) && n > 0 ? n : 0; };
+const ms = d => (d == null ? null : d.getTime());
+
+// Violações de UNIQUE que podem acontecer por corrida entre duas requisições.
+const UNIQUE_MESSAGES = {
+  ux_products_code: 'Já existe outro produto com esse código de barras.',
+  ux_categories_name: 'Essa categoria já existe.',
+  ux_users_username: 'Esse usuário já existe.',
+};
+const DB_DOWN = new Set(['ECONNREFUSED', 'ECONNRESET', 'ENOTFOUND', 'ETIMEDOUT', 'EAI_AGAIN', '57P01', '57P03', '53300', '57014', '55P03']);
 
 // Converte quantidade decimal da API em milésimos inteiros, validando a unidade.
 function toMilli(v, unit, label) {
@@ -51,16 +63,20 @@ function createApp({ db, tzOffsetMin = -180, now = () => Date.now(), trustProxy 
     if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(String(s || ''))) throw bad('Mês inválido (use AAAA-MM).');
     const [y, m] = s.split('-').map(Number);
     return {
-      start: Date.UTC(y, m - 1, 1) - tzOffsetMin * 60000,
-      end: Date.UTC(y, m, 1) - tzOffsetMin * 60000,
+      start: new Date(Date.UTC(y, m - 1, 1) - tzOffsetMin * 60000),
+      end: new Date(Date.UTC(y, m, 1) - tzOffsetMin * 60000),
       days: new Date(Date.UTC(y, m, 0)).getUTCDate(),
     };
   }
   function todayRange() {
     const d = localDate(now());
     const start = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - tzOffsetMin * 60000;
-    return { start, end: start + 86400000 };
+    return { start: new Date(start), end: new Date(start + 86400000) };
   }
+
+  /* ---------- acesso ao banco ---------- */
+  const q = (sql, params) => db.query(sql, params);
+  const one = async (sql, params) => (await db.query(sql, params))[0];
 
   /* ---------- middlewares gerais ---------- */
   app.use((req, res, next) => {
@@ -93,31 +109,29 @@ function createApp({ db, tzOffsetMin = -180, now = () => Date.now(), trustProxy 
   };
 
   /* ---------- sessão ---------- */
-  const qSession = db.prepare(`SELECT s.expires_at, s.touched_at, u.id, u.name, u.username, u.role, u.active
-    FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ?`);
-
-  function currentUser(req) {
+  async function currentUser(req) {
     const sid = parseCookies(req.headers.cookie).sid;
     if (!sid) return null;
     const th = hashToken(sid);
-    const row = qSession.get(th);
+    const row = await one(`SELECT s.expires_at, s.touched_at, u.id, u.name, u.username, u.role, u.active
+      FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = $1`, [th]);
     if (!row) return null;
     const t = now();
-    if (row.expires_at <= t || !row.active) {
-      db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(th);
+    if (ms(row.expires_at) <= t || !row.active) {
+      await q('DELETE FROM sessions WHERE token_hash = $1', [th]);
       return null;
     }
-    if (t - row.touched_at > TOUCH_MS) {
-      db.prepare('UPDATE sessions SET touched_at = ?, expires_at = ? WHERE token_hash = ?').run(t, t + SESSION_MS, th);
+    if (t - ms(row.touched_at) > TOUCH_MS) {
+      await q('UPDATE sessions SET touched_at = $1, expires_at = $2 WHERE token_hash = $3', [new Date(t), new Date(t + SESSION_MS), th]);
     }
     return { id: row.id, name: row.name, username: row.username, role: row.role, tokenHash: th };
   }
-  const auth = (req, res, next) => {
-    const u = currentUser(req);
+  const auth = wrap(async (req, res, next) => {
+    const u = await currentUser(req);
     if (!u) return res.status(401).json({ error: 'Sessão expirada. Entre novamente.' });
     req.user = u;
     next();
-  };
+  });
   const owner = (req, res, next) => (req.user.role === 'dono'
     ? next()
     : res.status(403).json({ error: 'Apenas o dono pode fazer isso.' }));
@@ -134,7 +148,7 @@ function createApp({ db, tzOffsetMin = -180, now = () => Date.now(), trustProxy 
     return 0;
   }
 
-  app.post('/api/login', wrap((req, res) => {
+  app.post('/api/login', wrap(async (req, res) => {
     const b = body(req);
     const username = str(b.username, 64).toLowerCase();
     const password = typeof b.password === 'string' ? b.password : '';
@@ -142,7 +156,7 @@ function createApp({ db, tzOffsetMin = -180, now = () => Date.now(), trustProxy 
     const key = `${req.ip}|${username}`;
     const wait = lockInfo(key);
     if (wait) throw new HttpError(429, `Muitas tentativas. Tente de novo em ${Math.ceil(wait / 60000)} min.`);
-    const u = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
+    const u = await one('SELECT * FROM users WHERE username = $1', [username]);
     const ok = verifyPassword(password, u ? u.pass_hash : DUMMY_HASH) && u && u.active;
     if (!ok) {
       const f = fails.get(key) || { n: 0 };
@@ -155,72 +169,74 @@ function createApp({ db, tzOffsetMin = -180, now = () => Date.now(), trustProxy 
     fails.delete(key);
     const token = newToken();
     const t = now();
-    db.prepare('INSERT INTO sessions(token_hash, user_id, expires_at, touched_at) VALUES (?,?,?,?)')
-      .run(hashToken(token), u.id, t + SESSION_MS, t);
-    db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(t);
+    await q('INSERT INTO sessions(token_hash, user_id, expires_at, touched_at) VALUES ($1,$2,$3,$4)',
+      [hashToken(token), u.id, new Date(t + SESSION_MS), new Date(t)]);
+    await q('DELETE FROM sessions WHERE expires_at <= $1', [new Date(t)]);
     res.cookie('sid', token, { httpOnly: true, sameSite: 'lax', secure: req.secure, maxAge: SESSION_MS, path: '/' });
     res.json({ user: publicUser(u) });
   }));
 
-  app.post('/api/logout', wrap((req, res) => {
+  app.post('/api/logout', wrap(async (req, res) => {
     const sid = parseCookies(req.headers.cookie).sid;
-    if (sid) db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(hashToken(sid));
+    if (sid) await q('DELETE FROM sessions WHERE token_hash = $1', [hashToken(sid)]);
     res.clearCookie('sid', { path: '/' });
     res.json({ ok: true });
   }));
 
   app.get('/api/me', auth, (req, res) => res.json({ user: publicUser(req.user) }));
 
-  app.post('/api/me/password', auth, wrap((req, res) => {
+  app.post('/api/me/password', auth, wrap(async (req, res) => {
     const b = body(req);
-    const u = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+    const u = await one('SELECT * FROM users WHERE id = $1', [req.user.id]);
     if (typeof b.current !== 'string' || !verifyPassword(b.current, u.pass_hash)) throw bad('Senha atual incorreta.');
     if (typeof b.next !== 'string' || b.next.length < 8 || b.next.length > 200) throw bad('A nova senha precisa ter pelo menos 8 caracteres.');
-    db.transaction(() => {
-      db.prepare('UPDATE users SET pass_hash = ? WHERE id = ?').run(hashPassword(b.next), u.id);
-      db.prepare('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?').run(u.id, req.user.tokenHash);
-    })();
+    const hash = hashPassword(b.next);
+    await db.tx(async c => {
+      await c.query('UPDATE users SET pass_hash = $1 WHERE id = $2', [hash, u.id]);
+      await c.query('DELETE FROM sessions WHERE user_id = $1 AND token_hash <> $2', [u.id, req.user.tokenHash]);
+    });
     res.json({ ok: true });
   }));
 
   /* ---------- categorias ---------- */
   const categoryJson = c => ({ id: c.id, name: c.name, products: c.products });
-  const listCategories = () => db.prepare(`SELECT c.id, c.name,
-      (SELECT COUNT(*) FROM products p WHERE p.category_id = c.id AND p.active = 1) AS products
-    FROM categories c ORDER BY c.name COLLATE NOCASE`).all().map(categoryJson);
+  const listCategories = async () => (await q(`SELECT c.id, c.name,
+      (SELECT COUNT(*) FROM products p WHERE p.category_id = c.id AND p.active) AS products
+    FROM categories c ORDER BY lower(c.name), c.id`)).map(categoryJson);
 
-  app.get('/api/categories', auth, (req, res) => res.json(listCategories()));
+  app.get('/api/categories', auth, wrap(async (req, res) => res.json(await listCategories())));
 
-  app.post('/api/categories', auth, owner, wrap((req, res) => {
+  app.post('/api/categories', auth, owner, wrap(async (req, res) => {
     const name = str(body(req).name, 60);
     if (!name) throw bad('Digite o nome da categoria.');
-    if (db.prepare('SELECT 1 FROM categories WHERE name = ?').get(name)) throw new HttpError(409, 'Essa categoria já existe.');
-    db.prepare('INSERT INTO categories(name) VALUES (?)').run(name);
-    res.status(201).json(listCategories());
+    if (await one('SELECT 1 FROM categories WHERE lower(name) = lower($1)', [name])) throw new HttpError(409, 'Essa categoria já existe.');
+    await q('INSERT INTO categories(name) VALUES ($1)', [name]);
+    res.status(201).json(await listCategories());
   }));
 
-  app.put('/api/categories/:id', auth, owner, wrap((req, res) => {
-    const id = Number(req.params.id);
+  app.put('/api/categories/:id', auth, owner, wrap(async (req, res) => {
+    const id = idOf(req.params.id);
     const name = str(body(req).name, 60);
     if (!name) throw bad('O nome não pode ficar vazio.');
-    if (!db.prepare('SELECT 1 FROM categories WHERE id = ?').get(id)) throw new HttpError(404, 'Categoria não encontrada.');
-    if (db.prepare('SELECT 1 FROM categories WHERE name = ? AND id != ?').get(name, id)) throw new HttpError(409, 'Já existe uma categoria com esse nome.');
-    db.prepare('UPDATE categories SET name = ? WHERE id = ?').run(name, id);
-    res.json(listCategories());
+    if (!await one('SELECT 1 FROM categories WHERE id = $1', [id])) throw new HttpError(404, 'Categoria não encontrada.');
+    if (await one('SELECT 1 FROM categories WHERE lower(name) = lower($1) AND id <> $2', [name, id])) throw new HttpError(409, 'Já existe uma categoria com esse nome.');
+    await q('UPDATE categories SET name = $1 WHERE id = $2', [name, id]);
+    res.json(await listCategories());
   }));
 
-  app.delete('/api/categories/:id', auth, owner, wrap((req, res) => {
-    const id = Number(req.params.id);
-    if (!db.prepare('SELECT 1 FROM categories WHERE id = ?').get(id)) throw new HttpError(404, 'Categoria não encontrada.');
-    if (db.prepare('SELECT 1 FROM products WHERE category_id = ?').get(id)) {
+  app.delete('/api/categories/:id', auth, owner, wrap(async (req, res) => {
+    const id = idOf(req.params.id);
+    if (!await one('SELECT 1 FROM categories WHERE id = $1', [id])) throw new HttpError(404, 'Categoria não encontrada.');
+    if (await one('SELECT 1 FROM products WHERE category_id = $1 LIMIT 1', [id])) {
       throw new HttpError(409, 'Mova ou exclua os produtos dessa categoria antes de excluí-la.');
     }
-    db.prepare('DELETE FROM categories WHERE id = ?').run(id);
-    res.json(listCategories());
+    // Se um produto entrar na categoria entre a checagem e o DELETE, a FK barra.
+    await q('DELETE FROM categories WHERE id = $1', [id]);
+    res.json(await listCategories());
   }));
 
   /* ---------- produtos ---------- */
-  const SELECT_PRODUCT = `SELECT p.*, c.name AS category FROM products p JOIN categories c ON c.id = p.category_id`;
+  const SELECT_PRODUCT = 'SELECT p.*, c.name AS category FROM products p JOIN categories c ON c.id = p.category_id';
   const productJson = (p, withCost) => {
     const o = {
       id: p.id, name: p.name, category: p.category, code: p.code || '', unit: p.unit,
@@ -230,19 +246,19 @@ function createApp({ db, tzOffsetMin = -180, now = () => Date.now(), trustProxy 
     if (withCost) o.cost = p.cost_cents;
     return o;
   };
-  const getProduct = id => db.prepare(`${SELECT_PRODUCT} WHERE p.id = ? AND p.active = 1`).get(id);
-  const mustProduct = id => {
-    const p = getProduct(id);
+  const getProduct = id => one(`${SELECT_PRODUCT} WHERE p.id = $1 AND p.active`, [id]);
+  const mustProduct = async id => {
+    const p = await getProduct(id);
     if (!p) throw new HttpError(404, 'Produto não encontrado.');
     return p;
   };
-  const logMove = (productId, type, qtyMilli, userId, note, saleId, t) =>
-    db.prepare('INSERT INTO stock_movements(product_id, type, qty_milli, note, user_id, sale_id, created_at) VALUES (?,?,?,?,?,?,?)')
-      .run(productId, type, qtyMilli, note || null, userId, saleId || null, t);
+  const logMove = (c, productId, type, qtyMilli, userId, note, saleId, t) =>
+    c.query('INSERT INTO stock_movements(product_id, type, qty_milli, note, user_id, sale_id, created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)',
+      [productId, type, qtyMilli, note || null, userId, saleId || null, new Date(t)]);
 
-  function categoryId(name) {
-    db.prepare('INSERT INTO categories(name) VALUES (?) ON CONFLICT(name) DO NOTHING').run(name);
-    return db.prepare('SELECT id FROM categories WHERE name = ?').get(name).id;
+  async function categoryId(c, name) {
+    await c.query('INSERT INTO categories(name) VALUES ($1) ON CONFLICT ((lower(name))) DO NOTHING', [name]);
+    return (await c.query('SELECT id FROM categories WHERE lower(name) = lower($1)', [name]))[0].id;
   }
 
   function parseProduct(b) {
@@ -259,73 +275,78 @@ function createApp({ db, tzOffsetMin = -180, now = () => Date.now(), trustProxy 
       min: toMilli(b.min == null ? 0 : b.min, b.unit, 'Estoque mínimo'),
     };
   }
-  const codeTaken = (code, exceptId) => code
-    && db.prepare('SELECT 1 FROM products WHERE code = ? AND active = 1 AND id != ?').get(code, exceptId || 0);
+  const codeTaken = async (code, exceptId) => code
+    && !!await one('SELECT 1 FROM products WHERE code = $1 AND active AND id <> $2', [code, exceptId || 0]);
 
-  app.get('/api/products', auth, (req, res) => {
+  app.get('/api/products', auth, wrap(async (req, res) => {
     const withCost = req.user.role === 'dono';
-    res.json(db.prepare(`${SELECT_PRODUCT} WHERE p.active = 1 ORDER BY p.name COLLATE NOCASE`).all()
+    res.json((await q(`${SELECT_PRODUCT} WHERE p.active ORDER BY lower(p.name), p.id`))
       .map(p => productJson(p, withCost)));
-  });
-
-  app.post('/api/products', auth, owner, wrap((req, res) => {
-    const p = parseProduct(body(req));
-    if (codeTaken(p.code)) throw new HttpError(409, 'Já existe outro produto com esse código de barras.');
-    const t = now();
-    const id = db.transaction(() => {
-      const r = db.prepare(`INSERT INTO products(name, category_id, code, unit, cost_cents, price_cents, stock_milli, min_milli, created_at)
-        VALUES (?,?,?,?,?,?,?,?,?)`).run(p.name, categoryId(p.category), p.code, p.unit, p.cost, p.price, p.stock, p.min, t);
-      if (p.stock > 0) logMove(r.lastInsertRowid, 'inicial', p.stock, req.user.id, 'Cadastro do produto', null, t);
-      return r.lastInsertRowid;
-    })();
-    res.status(201).json(productJson(getProduct(id), true));
   }));
 
-  app.put('/api/products/:id', auth, owner, wrap((req, res) => {
-    const old = mustProduct(Number(req.params.id));
+  app.post('/api/products', auth, owner, wrap(async (req, res) => {
     const p = parseProduct(body(req));
-    if (codeTaken(p.code, old.id)) throw new HttpError(409, 'Já existe outro produto com esse código de barras.');
+    if (await codeTaken(p.code)) throw new HttpError(409, 'Já existe outro produto com esse código de barras.');
     const t = now();
-    db.transaction(() => {
-      db.prepare(`UPDATE products SET name=?, category_id=?, code=?, unit=?, cost_cents=?, price_cents=?, stock_milli=?, min_milli=? WHERE id=?`)
-        .run(p.name, categoryId(p.category), p.code, p.unit, p.cost, p.price, p.stock, p.min, old.id);
-      if (p.stock !== old.stock_milli) logMove(old.id, 'ajuste', p.stock - old.stock_milli, req.user.id, 'Ajuste manual no cadastro', null, t);
-    })();
-    res.json(productJson(getProduct(old.id), true));
+    const id = await db.tx(async c => {
+      const [r] = await c.query(`INSERT INTO products(name, category_id, code, unit, cost_cents, price_cents, stock_milli, min_milli, created_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
+      [p.name, await categoryId(c, p.category), p.code, p.unit, p.cost, p.price, p.stock, p.min, new Date(t)]);
+      if (p.stock > 0) await logMove(c, r.id, 'inicial', p.stock, req.user.id, 'Cadastro do produto', null, t);
+      return r.id;
+    });
+    res.status(201).json(productJson(await getProduct(id), true));
   }));
 
-  app.delete('/api/products/:id', auth, owner, wrap((req, res) => {
-    const p = mustProduct(Number(req.params.id));
+  app.put('/api/products/:id', auth, owner, wrap(async (req, res) => {
+    const old = await mustProduct(idOf(req.params.id));
+    const p = parseProduct(body(req));
+    if (await codeTaken(p.code, old.id)) throw new HttpError(409, 'Já existe outro produto com esse código de barras.');
+    const t = now();
+    await db.tx(async c => {
+      // Relê o estoque com a linha travada: uma venda simultânea não some do ajuste.
+      const [cur] = await c.query('SELECT stock_milli FROM products WHERE id = $1 AND active FOR UPDATE', [old.id]);
+      if (!cur) throw new HttpError(404, 'Produto não encontrado.');
+      await c.query(`UPDATE products SET name=$1, category_id=$2, code=$3, unit=$4, cost_cents=$5, price_cents=$6, stock_milli=$7, min_milli=$8 WHERE id=$9`,
+        [p.name, await categoryId(c, p.category), p.code, p.unit, p.cost, p.price, p.stock, p.min, old.id]);
+      if (p.stock !== cur.stock_milli) await logMove(c, old.id, 'ajuste', p.stock - cur.stock_milli, req.user.id, 'Ajuste manual no cadastro', null, t);
+    });
+    res.json(productJson(await getProduct(old.id), true));
+  }));
+
+  app.delete('/api/products/:id', auth, owner, wrap(async (req, res) => {
+    const p = await mustProduct(idOf(req.params.id));
     // Exclusão lógica: vendas antigas continuam apontando para o produto.
-    db.prepare('UPDATE products SET active = 0 WHERE id = ?').run(p.id);
+    await q('UPDATE products SET active = false WHERE id = $1', [p.id]);
     res.json({ ok: true });
   }));
 
-  app.post('/api/products/:id/restock', auth, owner, wrap((req, res) => {
-    const p = mustProduct(Number(req.params.id));
+  app.post('/api/products/:id/restock', auth, owner, wrap(async (req, res) => {
+    const p = await mustProduct(idOf(req.params.id));
     const b = body(req);
     const qty = toMilli(b.qty, p.unit, 'Quantidade');
     if (qty <= 0) throw bad('Informe a quantidade que chegou.');
     const cost = b.cost == null ? p.cost_cents : b.cost;
     if (!isCents(cost)) throw bad('Preço de compra inválido.');
-    db.transaction(() => {
-      db.prepare('UPDATE products SET stock_milli = stock_milli + ?, cost_cents = ? WHERE id = ?').run(qty, cost, p.id);
-      logMove(p.id, 'entrada', qty, req.user.id, 'Entrada de mercadoria', null, now());
-    })();
-    res.json(productJson(getProduct(p.id), true));
+    await db.tx(async c => {
+      const r = await c.query('UPDATE products SET stock_milli = stock_milli + $1, cost_cents = $2 WHERE id = $3 AND active RETURNING id', [qty, cost, p.id]);
+      if (!r.length) throw new HttpError(404, 'Produto não encontrado.');
+      await logMove(c, p.id, 'entrada', qty, req.user.id, 'Entrada de mercadoria', null, now());
+    });
+    res.json(productJson(await getProduct(p.id), true));
   }));
 
-  app.get('/api/products/:id/movements', auth, owner, wrap((req, res) => {
-    const id = Number(req.params.id);
-    const p = db.prepare('SELECT id, name, unit FROM products WHERE id = ?').get(id);
+  app.get('/api/products/:id/movements', auth, owner, wrap(async (req, res) => {
+    const id = idOf(req.params.id);
+    const p = await one('SELECT id, name, unit FROM products WHERE id = $1', [id]);
     if (!p) throw new HttpError(404, 'Produto não encontrado.');
-    const rows = db.prepare(`SELECT m.type, m.qty_milli, m.note, m.created_at, m.sale_id, u.name AS user_name, s.number AS sale_number
+    const rows = await q(`SELECT m.type, m.qty_milli, m.note, m.created_at, m.sale_id, u.name AS user_name, s.number AS sale_number
       FROM stock_movements m LEFT JOIN users u ON u.id = m.user_id LEFT JOIN sales s ON s.id = m.sale_id
-      WHERE m.product_id = ? ORDER BY m.created_at DESC, m.id DESC LIMIT 100`).all(id);
+      WHERE m.product_id = $1 ORDER BY m.created_at DESC, m.id DESC LIMIT 100`, [id]);
     res.json({
       product: { id: p.id, name: p.name, unit: p.unit },
       movements: rows.map(m => ({
-        type: m.type, qty: m.qty_milli / 1000, note: m.note, at: m.created_at,
+        type: m.type, qty: m.qty_milli / 1000, note: m.note, at: ms(m.created_at),
         user: m.user_name, sale: m.sale_number,
       })),
     });
@@ -342,7 +363,7 @@ function createApp({ db, tzOffsetMin = -180, now = () => Date.now(), trustProxy 
   };
   const saleJson = (s, items, withCost) => {
     const o = {
-      id: s.id, number: s.number, at: s.created_at, user: s.user_name,
+      id: s.id, number: s.number, at: ms(s.created_at), user: s.user_name,
       subtotal: s.subtotal_cents, discount: s.discount_cents, total: s.total_cents,
       payment: s.payment, received: s.received_cents,
       change: s.received_cents == null ? null : s.received_cents - s.total_cents,
@@ -352,26 +373,33 @@ function createApp({ db, tzOffsetMin = -180, now = () => Date.now(), trustProxy 
     if (withCost) { o.cost = s.cost_cents; o.profit = s.total_cents - s.cost_cents; }
     return o;
   };
-  const SELECT_SALE = `SELECT s.*, u.name AS user_name FROM sales s JOIN users u ON u.id = s.user_id`;
-  const loadSale = (id, withCost) => {
-    const s = db.prepare(`${SELECT_SALE} WHERE s.id = ?`).get(id);
+  const SELECT_SALE = 'SELECT s.*, u.name AS user_name FROM sales s JOIN users u ON u.id = s.user_id';
+  const loadSale = async (id, withCost) => {
+    const s = await one(`${SELECT_SALE} WHERE s.id = $1`, [id]);
     if (!s) return null;
-    return saleJson(s, db.prepare('SELECT * FROM sale_items WHERE sale_id = ? ORDER BY id').all(id), withCost);
+    return saleJson(s, await q('SELECT * FROM sale_items WHERE sale_id = $1 ORDER BY id', [id]), withCost);
   };
 
-  const createSale = db.transaction((user, b) => {
+  // Tudo numa transação só: valida, grava a venda, os itens, baixa o estoque
+  // (condicional, nunca negativo) e registra o histórico. Qualquer erro desfaz tudo.
+  const createSale = (user, b) => db.tx(async c => {
+    await c.query('SELECT pg_advisory_xact_lock($1)', [SALES_LOCK]);
     const requestId = b.request_id == null ? null : str(b.request_id, 80);
     if (requestId) {
-      const dup = db.prepare('SELECT id FROM sales WHERE request_id = ?').get(requestId);
+      const [dup] = await c.query('SELECT id FROM sales WHERE request_id = $1', [requestId]);
       if (dup) return { id: dup.id, duplicate: true };
     }
     if (!Array.isArray(b.items) || !b.items.length || b.items.length > 200) throw bad('A venda precisa ter pelo menos um item.');
 
     // Preço e custo vêm SEMPRE do banco; o cliente só diz produto e quantidade.
+    // As linhas dos produtos ficam travadas (em ordem de id, sem deadlock) até o fim.
+    const ids = [...new Set(b.items.filter(it => it && Number.isSafeInteger(it.product_id) && it.product_id > 0).map(it => it.product_id))];
+    const found = new Map((await c.query(`${SELECT_PRODUCT} WHERE p.id = ANY($1::bigint[]) AND p.active ORDER BY p.id FOR UPDATE OF p`, [ids]))
+      .map(p => [p.id, p]));
     const lines = new Map();
     for (const it of b.items) {
       if (!it || !Number.isSafeInteger(it.product_id)) throw bad('Item inválido.');
-      const p = getProduct(it.product_id);
+      const p = found.get(it.product_id);
       if (!p) throw new HttpError(409, 'Um dos produtos não existe mais. Atualize a tela e refaça a venda.');
       const milli = toMilli(it.qty, p.unit, `Quantidade de "${p.name}"`);
       if (milli <= 0) throw bad(`Quantidade de "${p.name}" deve ser maior que zero.`);
@@ -386,7 +414,7 @@ function createApp({ db, tzOffsetMin = -180, now = () => Date.now(), trustProxy 
     }
     const totals = list.map(({ p, milli }) => Math.round((p.price_cents * milli) / 1000));
     const costs = list.map(({ p, milli }) => Math.round((p.cost_cents * milli) / 1000));
-    const subtotal = totals.reduce((a, c) => a + c, 0);
+    const subtotal = totals.reduce((a, x) => a + x, 0);
     if (subtotal > 1e9) throw bad('Valor da venda acima do limite.');
     const discount = b.discount == null ? 0 : b.discount;
     if (!isCents(discount) || discount > subtotal) throw bad('Desconto inválido (não pode passar do subtotal).');
@@ -399,88 +427,102 @@ function createApp({ db, tzOffsetMin = -180, now = () => Date.now(), trustProxy 
       received = b.received;
     }
     const discounts = allocateDiscount(totals, discount, subtotal);
-    const t = now();
-    const number = db.prepare('SELECT COALESCE(MAX(number), 0) + 1 AS n FROM sales').get().n;
-    const sale = db.prepare(`INSERT INTO sales(number, request_id, user_id, created_at, subtotal_cents, discount_cents, total_cents, cost_cents, payment, received_cents)
-      VALUES (?,?,?,?,?,?,?,?,?,?)`)
-      .run(number, requestId, user.id, t, subtotal, discount, total, costs.reduce((a, c) => a + c, 0), b.payment, received);
-    const saleId = Number(sale.lastInsertRowid);
-    const insItem = db.prepare(`INSERT INTO sale_items(sale_id, product_id, name, category, unit, qty_milli, price_cents, cost_cents, total_cents, discount_cents, cost_total_cents)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?)`);
-    const dec = db.prepare('UPDATE products SET stock_milli = stock_milli - ? WHERE id = ? AND stock_milli >= ?');
-    list.forEach(({ p, milli }, i) => {
-      insItem.run(saleId, p.id, p.name, p.category, p.unit, milli, p.price_cents, p.cost_cents, totals[i], discounts[i], costs[i]);
-      if (dec.run(milli, p.id, milli).changes !== 1) throw new HttpError(409, `Estoque insuficiente de "${p.name}".`);
-      logMove(p.id, 'venda', -milli, user.id, null, saleId, t);
-    });
-    return { id: saleId, duplicate: false };
+    const t = new Date(now());
+    const [{ n: number }] = await c.query('SELECT COALESCE(MAX(number), 0) + 1 AS n FROM sales');
+    const [sale] = await c.query(`INSERT INTO sales(number, request_id, user_id, created_at, subtotal_cents, discount_cents, total_cents, cost_cents, payment, received_cents)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
+    [number, requestId, user.id, t, subtotal, discount, total, costs.reduce((a, x) => a + x, 0), b.payment, received]);
+    const col = f => list.map(f);
+    await c.query(`INSERT INTO sale_items(sale_id, product_id, name, category, unit, qty_milli, price_cents, cost_cents, total_cents, discount_cents, cost_total_cents)
+      SELECT $1, product_id, name, category, unit, qty, price, cost, total, discount, cost_total
+      FROM unnest($2::bigint[], $3::text[], $4::text[], $5::text[], $6::bigint[], $7::bigint[], $8::bigint[], $9::bigint[], $10::bigint[], $11::bigint[])
+      WITH ORDINALITY AS x(product_id, name, category, unit, qty, price, cost, total, discount, cost_total, ord) ORDER BY ord`,
+    [sale.id, col(l => l.p.id), col(l => l.p.name), col(l => l.p.category), col(l => l.p.unit), col(l => l.milli),
+      col(l => l.p.price_cents), col(l => l.p.cost_cents), totals, discounts, costs]);
+    const updated = await c.query(`UPDATE products p SET stock_milli = p.stock_milli - x.qty
+      FROM unnest($1::bigint[], $2::bigint[]) AS x(id, qty)
+      WHERE p.id = x.id AND p.stock_milli >= x.qty RETURNING p.id`, [col(l => l.p.id), col(l => l.milli)]);
+    if (updated.length !== list.length) {
+      const miss = list.find(l => !updated.some(u => u.id === l.p.id));
+      throw new HttpError(409, `Estoque insuficiente de "${miss.p.name}".`);
+    }
+    await c.query(`INSERT INTO stock_movements(product_id, type, qty_milli, user_id, sale_id, created_at)
+      SELECT x.id, 'venda', -x.qty, $3, $4, $5 FROM unnest($1::bigint[], $2::bigint[]) WITH ORDINALITY AS x(id, qty, ord) ORDER BY ord`,
+    [col(l => l.p.id), col(l => l.milli), user.id, sale.id, t]);
+    return { id: sale.id, duplicate: false };
   });
 
-  app.post('/api/sales', auth, wrap((req, res) => {
-    const r = createSale.immediate(req.user, body(req));
-    res.status(r.duplicate ? 200 : 201).json({ sale: loadSale(r.id, req.user.role === 'dono'), duplicate: r.duplicate });
+  app.post('/api/sales', auth, wrap(async (req, res) => {
+    const r = await createSale(req.user, body(req));
+    res.status(r.duplicate ? 200 : 201).json({ sale: await loadSale(r.id, req.user.role === 'dono'), duplicate: r.duplicate });
   }));
 
-  app.get('/api/sales', auth, wrap((req, res) => {
+  app.get('/api/sales', auth, wrap(async (req, res) => {
     const isOwner = req.user.role === 'dono';
     const range = isOwner ? monthRange(req.query.month) : todayRange();
-    const filter = isOwner ? '' : ' AND s.user_id = @uid';
-    const params = { start: range.start, end: range.end, uid: req.user.id };
-    const sales = db.prepare(`${SELECT_SALE} WHERE s.created_at >= @start AND s.created_at < @end${filter} ORDER BY s.created_at DESC, s.id DESC`).all(params);
-    const items = db.prepare(`SELECT si.* FROM sale_items si JOIN sales s ON s.id = si.sale_id
-      WHERE s.created_at >= @start AND s.created_at < @end${filter} ORDER BY si.id`).all(params);
+    const filter = isOwner ? '' : ' AND s.user_id = $3';
+    const params = isOwner ? [range.start, range.end] : [range.start, range.end, req.user.id];
+    const sales = await q(`${SELECT_SALE} WHERE s.created_at >= $1 AND s.created_at < $2${filter} ORDER BY s.created_at DESC, s.id DESC`, params);
+    const items = await q(`SELECT si.* FROM sale_items si JOIN sales s ON s.id = si.sale_id
+      WHERE s.created_at >= $1 AND s.created_at < $2${filter} ORDER BY si.id`, params);
     const bySale = new Map();
     items.forEach(i => { if (!bySale.has(i.sale_id)) bySale.set(i.sale_id, []); bySale.get(i.sale_id).push(i); });
     res.json(sales.map(s => saleJson(s, bySale.get(s.id) || [], isOwner)));
   }));
 
-  const cancelSale = db.transaction((user, id, reason) => {
-    const s = db.prepare('SELECT * FROM sales WHERE id = ?').get(id);
+  const cancelSale = (user, id, reason) => db.tx(async c => {
+    await c.query('SELECT pg_advisory_xact_lock($1)', [SALES_LOCK]);
+    const [s] = await c.query('SELECT * FROM sales WHERE id = $1 FOR UPDATE', [id]);
     if (!s) throw new HttpError(404, 'Venda não encontrada.');
     if (s.status === 'cancelada') throw new HttpError(409, 'Essa venda já foi cancelada.');
-    const t = now();
-    db.prepare('UPDATE sales SET status = ?, cancelled_at = ?, cancelled_by = ?, cancel_reason = ? WHERE id = ?')
-      .run('cancelada', t, user.id, reason || null, id);
-    for (const i of db.prepare('SELECT product_id, qty_milli FROM sale_items WHERE sale_id = ?').all(id)) {
-      db.prepare('UPDATE products SET stock_milli = stock_milli + ? WHERE id = ?').run(i.qty_milli, i.product_id);
-      logMove(i.product_id, 'cancelamento', i.qty_milli, user.id, `Cancelamento da venda #${s.number}`, id, t);
-    }
+    const t = new Date(now());
+    await c.query(`UPDATE sales SET status = 'cancelada', cancelled_at = $1, cancelled_by = $2, cancel_reason = $3 WHERE id = $4 AND status = 'ok'`,
+      [t, user.id, reason || null, id]);
+    const items = await c.query('SELECT product_id, SUM(qty_milli) AS qty FROM sale_items WHERE sale_id = $1 GROUP BY product_id ORDER BY product_id', [id]);
+    const pids = items.map(i => i.product_id);
+    const qtys = items.map(i => i.qty);
+    await c.query('SELECT id FROM products WHERE id = ANY($1::bigint[]) ORDER BY id FOR UPDATE', [pids]);
+    await c.query(`UPDATE products p SET stock_milli = p.stock_milli + x.qty
+      FROM unnest($1::bigint[], $2::bigint[]) AS x(id, qty) WHERE p.id = x.id`, [pids, qtys]);
+    await c.query(`INSERT INTO stock_movements(product_id, type, qty_milli, note, user_id, sale_id, created_at)
+      SELECT x.id, 'cancelamento', x.qty, $3, $4, $5, $6 FROM unnest($1::bigint[], $2::bigint[]) WITH ORDINALITY AS x(id, qty, ord) ORDER BY ord`,
+    [pids, qtys, `Cancelamento da venda #${s.number}`, user.id, id, t]);
   });
 
-  app.post('/api/sales/:id/cancel', auth, owner, wrap((req, res) => {
-    const id = Number(req.params.id);
-    cancelSale.immediate(req.user, id, str(body(req).reason, 200));
-    res.json(loadSale(id, true));
+  app.post('/api/sales/:id/cancel', auth, owner, wrap(async (req, res) => {
+    const id = idOf(req.params.id);
+    await cancelSale(req.user, id, str(body(req).reason, 200));
+    res.json(await loadSale(id, true));
   }));
 
   /* ---------- relatório do mês ---------- */
-  app.get('/api/reports/month', auth, owner, wrap((req, res) => {
+  app.get('/api/reports/month', auth, owner, wrap(async (req, res) => {
     const r = monthRange(req.query.month);
     const params = [r.start, r.end];
-    const sales = db.prepare(`SELECT total_cents, cost_cents, payment, created_at FROM sales
-      WHERE status = 'ok' AND created_at >= ? AND created_at < ?`).all(...params);
+    const sales = await q(`SELECT total_cents, cost_cents, payment, created_at FROM sales
+      WHERE status = 'ok' AND created_at >= $1 AND created_at < $2`, params);
     let revenue = 0; let cost = 0;
     const days = Array.from({ length: r.days }, () => ({ revenue: 0, profit: 0 }));
     const byPay = {};
     for (const s of sales) {
       revenue += s.total_cents; cost += s.cost_cents;
-      const d = days[localDate(s.created_at).getUTCDate() - 1];
+      const d = days[localDate(ms(s.created_at)).getUTCDate() - 1];
       d.revenue += s.total_cents; d.profit += s.total_cents - s.cost_cents;
       const bp = byPay[s.payment] || (byPay[s.payment] = { payment: s.payment, count: 0, revenue: 0 });
       bp.count++; bp.revenue += s.total_cents;
     }
-    const grouped = col => db.prepare(`SELECT ${col} AS k, MAX(si.name) AS name, MAX(si.unit) AS unit, SUM(si.qty_milli) AS qty_milli,
+    const grouped = col => q(`SELECT ${col} AS k, MAX(si.name) AS name, MAX(si.unit) AS unit, SUM(si.qty_milli) AS qty_milli,
         SUM(si.total_cents - si.discount_cents) AS revenue, SUM(si.cost_total_cents) AS cost
       FROM sale_items si JOIN sales s ON s.id = si.sale_id
-      WHERE s.status = 'ok' AND s.created_at >= ? AND s.created_at < ?
+      WHERE s.status = 'ok' AND s.created_at >= $1 AND s.created_at < $2
       GROUP BY ${col}
-      ORDER BY (SUM(si.total_cents - si.discount_cents) - SUM(si.cost_total_cents)) DESC`).all(...params);
-    const top = grouped('si.product_id').slice(0, 10).map(x => ({
+      ORDER BY (SUM(si.total_cents - si.discount_cents) - SUM(si.cost_total_cents)) DESC, ${col}`, params);
+    const top = (await grouped('si.product_id')).slice(0, 10).map(x => ({
       name: x.name, unit: x.unit, qty: x.qty_milli / 1000, revenue: x.revenue, profit: x.revenue - x.cost,
     }));
-    const categories = grouped('si.category').map(x => ({ name: x.k, revenue: x.revenue, profit: x.revenue - x.cost }));
-    const low = db.prepare(`${SELECT_PRODUCT} WHERE p.active = 1 AND p.stock_milli <= p.min_milli ORDER BY p.stock_milli, p.name COLLATE NOCASE`)
-      .all().map(p => productJson(p, true));
+    const categories = (await grouped('si.category')).map(x => ({ name: x.k, revenue: x.revenue, profit: x.revenue - x.cost }));
+    const low = (await q(`${SELECT_PRODUCT} WHERE p.active AND p.stock_milli <= p.min_milli ORDER BY p.stock_milli, lower(p.name), p.id`))
+      .map(p => productJson(p, true));
     const profit = revenue - cost;
     res.json({
       month: req.query.month,
@@ -499,14 +541,14 @@ function createApp({ db, tzOffsetMin = -180, now = () => Date.now(), trustProxy 
 
   /* ---------- usuários ---------- */
   const userRow = u => ({ id: u.id, name: u.name, username: u.username, role: u.role, active: !!u.active });
-  const listUsers = () => db.prepare('SELECT * FROM users ORDER BY active DESC, name COLLATE NOCASE').all().map(userRow);
+  const listUsers = async () => (await q('SELECT id, name, username, role, active FROM users ORDER BY active DESC, lower(name), id')).map(userRow);
   const checkPassword = p => {
     if (typeof p !== 'string' || p.length < 8 || p.length > 200) throw bad('A senha precisa ter pelo menos 8 caracteres.');
   };
 
-  app.get('/api/users', auth, owner, (req, res) => res.json(listUsers()));
+  app.get('/api/users', auth, owner, wrap(async (req, res) => res.json(await listUsers())));
 
-  app.post('/api/users', auth, owner, wrap((req, res) => {
+  app.post('/api/users', auth, owner, wrap(async (req, res) => {
     const b = body(req);
     const name = str(b.name, 80);
     const username = str(b.username, 32).toLowerCase();
@@ -514,38 +556,45 @@ function createApp({ db, tzOffsetMin = -180, now = () => Date.now(), trustProxy 
     if (!/^[a-z0-9._-]{3,32}$/.test(username)) throw bad('Usuário: 3 a 32 caracteres (letras, números, ponto, hífen ou sublinhado).');
     if (b.role !== 'dono' && b.role !== 'caixa') throw bad('Perfil inválido.');
     checkPassword(b.password);
-    if (db.prepare('SELECT 1 FROM users WHERE username = ?').get(username)) throw new HttpError(409, 'Esse usuário já existe.');
-    db.prepare('INSERT INTO users(name, username, pass_hash, role, created_at) VALUES (?,?,?,?,?)')
-      .run(name, username, hashPassword(b.password), b.role, now());
-    res.status(201).json(listUsers());
+    if (await one('SELECT 1 FROM users WHERE username = $1', [username])) throw new HttpError(409, 'Esse usuário já existe.');
+    await q('INSERT INTO users(name, username, pass_hash, role, created_at) VALUES ($1,$2,$3,$4,$5)',
+      [name, username, hashPassword(b.password), b.role, new Date(now())]);
+    res.status(201).json(await listUsers());
   }));
 
-  app.put('/api/users/:id', auth, owner, wrap((req, res) => {
-    const id = Number(req.params.id);
+  app.put('/api/users/:id', auth, owner, wrap(async (req, res) => {
+    const id = idOf(req.params.id);
     const b = body(req);
-    const u = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+    const u = await one('SELECT * FROM users WHERE id = $1', [id]);
     if (!u) throw new HttpError(404, 'Usuário não encontrado.');
     const name = b.name === undefined ? u.name : str(b.name, 80);
     const role = b.role === undefined ? u.role : b.role;
-    const active = b.active === undefined ? u.active : (b.active ? 1 : 0);
+    const active = b.active === undefined ? u.active : !!b.active;
     if (!name) throw bad('Informe o nome.');
     if (role !== 'dono' && role !== 'caixa') throw bad('Perfil inválido.');
     if (id === req.user.id && (role !== 'dono' || !active)) throw bad('Você não pode rebaixar ou desativar a própria conta.');
     if (b.password !== undefined) checkPassword(b.password);
-    db.transaction(() => {
-      db.prepare('UPDATE users SET name = ?, role = ?, active = ? WHERE id = ?').run(name, role, active, id);
-      if (b.password !== undefined) db.prepare('UPDATE users SET pass_hash = ? WHERE id = ?').run(hashPassword(b.password), id);
-      if (b.password !== undefined || !active || role !== u.role) db.prepare('DELETE FROM sessions WHERE user_id = ?').run(id);
-    })();
-    res.json(listUsers());
+    const hash = b.password !== undefined ? hashPassword(b.password) : null;
+    await db.tx(async c => {
+      await c.query('UPDATE users SET name = $1, role = $2, active = $3 WHERE id = $4', [name, role, active, id]);
+      if (hash) await c.query('UPDATE users SET pass_hash = $1 WHERE id = $2', [hash, id]);
+      if (hash || !active || role !== u.role) await c.query('DELETE FROM sessions WHERE user_id = $1', [id]);
+    });
+    res.json(await listUsers());
   }));
 
   /* ---------- backup e exportação ---------- */
+  // Cópia completa e consistente (uma única transação de leitura) em JSON.
+  // Restaurar: scripts/restore.js (veja o README).
   app.get('/api/backup', auth, owner, wrap(async (req, res) => {
-    const tmp = path.join(os.tmpdir(), `alianca-backup-${process.pid}-${Date.now()}.db`);
-    await db.backup(tmp);
+    const data = await db.tx(c => dumpDataset(c));
     const d = localDate(now()).toISOString().slice(0, 10);
-    res.download(tmp, `alianca-backup-${d}.db`, () => fs.unlink(tmp, () => {}));
+    res.set({
+      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Disposition': `attachment; filename="alianca-backup-${d}.json"`,
+      'Cache-Control': 'no-store',
+    });
+    res.send(JSON.stringify(data));
   }));
 
   const csvCell = v => {
@@ -554,15 +603,15 @@ function createApp({ db, tzOffsetMin = -180, now = () => Date.now(), trustProxy 
   };
   const dec = c => (c / 100).toFixed(2).replace('.', ',');
 
-  app.get('/api/export/sales.csv', auth, owner, wrap((req, res) => {
+  app.get('/api/export/sales.csv', auth, owner, wrap(async (req, res) => {
     const r = monthRange(req.query.month);
-    const rows = db.prepare(`SELECT s.number, s.created_at, s.status, s.payment, s.discount_cents, s.total_cents, u.name AS operator,
+    const rows = await q(`SELECT s.number, s.created_at, s.status, s.payment, s.discount_cents, s.total_cents, u.name AS operator,
         si.name, si.category, si.qty_milli, si.price_cents, si.cost_cents
       FROM sales s JOIN users u ON u.id = s.user_id JOIN sale_items si ON si.sale_id = s.id
-      WHERE s.created_at >= ? AND s.created_at < ? ORDER BY s.created_at, s.id, si.id`).all(r.start, r.end);
+      WHERE s.created_at >= $1 AND s.created_at < $2 ORDER BY s.created_at, s.id, si.id`, [r.start, r.end]);
     const out = [['Venda', 'Data', 'Hora', 'Status', 'Operador', 'Produto', 'Categoria', 'Qtd', 'Preço unit.', 'Custo unit.', 'Pagamento', 'Desconto da venda', 'Total da venda']];
     for (const x of rows) {
-      const d = localDate(x.created_at).toISOString();
+      const d = localDate(ms(x.created_at)).toISOString();
       out.push([
         x.number, d.slice(0, 10).split('-').reverse().join('/'), d.slice(11, 16),
         x.status === 'ok' ? 'Concluída' : 'Cancelada', x.operator, x.name, x.category,
@@ -588,7 +637,13 @@ function createApp({ db, tzOffsetMin = -180, now = () => Date.now(), trustProxy 
     if (err instanceof HttpError) return res.status(err.status).json({ error: err.message });
     if (err && (err.type === 'entity.parse.failed' || err.status === 400)) return res.status(400).json({ error: 'Requisição inválida.' });
     if (err && err.status === 413) return res.status(413).json({ error: 'Requisição grande demais.' });
+    if (err && err.code === '23505') {
+      return res.status(409).json({ error: UNIQUE_MESSAGES[err.constraint] || 'Registro duplicado. Atualize a tela e tente de novo.' });
+    }
     console.error(err);
+    if (err && (DB_DOWN.has(err.code) || /Connection terminated|timeout exceeded when trying to connect/i.test(err.message || ''))) {
+      return res.status(503).json({ error: 'Banco de dados indisponível no momento. Tente de novo em instantes.' });
+    }
     res.status(500).json({ error: 'Erro interno do servidor.' });
   });
 
