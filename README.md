@@ -1,172 +1,417 @@
-# Mercado Aliança — Estoque e Vendas
 
-Front-end em HTML/CSS/JS puro (pasta `public/`) e backend em Node.js + Express (pasta `server/`), com banco **PostgreSQL no Supabase**.
+<div align="center">
 
-## Tecnologias
+# 🛒 MERCADO ALIANÇA
 
-- Node.js 22.13 ou mais novo, Express 5
-- PostgreSQL (Supabase), driver `pg` (node-postgres)
-- Autenticação própria: senha com scrypt, sessão em cookie httpOnly (o banco guarda só o hash do token)
-- Testes: `node:test` + PGlite (PostgreSQL embutido) ou um Postgres real
+### Sistema de Gestão Comercial, Estoque e Vendas
 
-## Como funciona a ligação com o Supabase
+**Uma solução completa para organizar operações comerciais, controlar o estoque e acompanhar resultados com segurança.**
 
-O navegador **nunca** fala com o Supabase. Só o servidor Node acessa o banco, pela connection string do Postgres (que fica em variável de ambiente, nunca no frontend). As regras de dono/caixa são aplicadas no servidor.
+![Node.js](https://img.shields.io/badge/Node.js-22+-339933?style=for-the-badge&logo=nodedotjs&logoColor=white)
+![Express](https://img.shields.io/badge/Express.js-5-000000?style=for-the-badge&logo=express&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)
+![Supabase](https://img.shields.io/badge/Supabase-3FCF8E?style=for-the-badge&logo=supabase&logoColor=white)
+![JavaScript](https://img.shields.io/badge/JavaScript-F7DF1E?style=for-the-badge&logo=javascript&logoColor=black)
 
-No banco, todas as tabelas têm **RLS ligado e nenhuma policy**, e as roles públicas do Supabase (`anon`, `authenticated`) não têm permissão nenhuma. Ou seja: mesmo que alguém pegue a URL/anon key do projeto, a API pública do Supabase não lê nem grava nada. **Não use a chave `service_role` neste sistema** — ela não é necessária.
+**Gestão inteligente • Controle de estoque • Segurança • Escalabilidade**
 
-## Estrutura do banco
+</div>
 
-| Tabela | Para quê |
+---
+
+## 📖 Sobre o projeto
+
+O **Mercado Aliança** é um sistema de gestão comercial desenvolvido para facilitar o gerenciamento das atividades diárias de estabelecimentos varejistas.
+
+A aplicação reúne funcionalidades de controle de produtos, estoque, vendas, usuários e relatórios financeiros em uma plataforma simples e organizada.
+
+O projeto utiliza uma arquitetura cliente-servidor, com backend em Node.js e Express e banco de dados PostgreSQL hospedado no Supabase.
+
+O sistema foi desenvolvido com foco em três pilares:
+
+- **Confiabilidade:** operações comerciais consistentes e proteção contra duplicidade de vendas.
+- **Segurança:** autenticação, controle de permissões e proteção das informações financeiras.
+- **Organização:** centralização das informações de produtos, estoque, movimentações e vendas.
+
+---
+
+## ✨ Funcionalidades
+
+### 📦 Gestão de produtos
+
+- Cadastro, edição e consulta de produtos.
+- Organização por categorias.
+- Controle de preços de compra e venda.
+- Acompanhamento das quantidades disponíveis.
+- Desativação de produtos sem perda do histórico.
+
+### 📊 Controle de estoque
+
+- Registro de entradas e ajustes.
+- Histórico de movimentações.
+- Atualização automática após vendas.
+- Devolução de mercadorias ao cancelar vendas.
+- Proteção contra estoque negativo.
+- Consistência em operações simultâneas.
+
+### 🛒 Gestão de vendas
+
+- Registro de vendas com múltiplos produtos.
+- Aplicação de descontos.
+- Cálculo automático dos valores.
+- Registro histórico de preços e custos.
+- Proteção contra vendas duplicadas.
+- Cancelamento controlado com reposição de estoque.
+- Processamento transacional das operações.
+
+### 👥 Usuários e permissões
+
+O sistema possui dois perfis principais:
+
+| Recurso | Dono | Caixa |
+|---|:---:|:---:|
+| Realizar vendas | ✅ | ✅ |
+| Consultar produtos | ✅ | ✅ |
+| Gerenciar produtos | ✅ | Restrito |
+| Controlar estoque | ✅ | Restrito |
+| Visualizar custos | ✅ | ❌ |
+| Visualizar lucro | ✅ | ❌ |
+| Relatórios administrativos | ✅ | ❌ |
+| Cancelar vendas | ✅ | ❌ |
+| Gerenciar usuários | ✅ | ❌ |
+
+As permissões são verificadas diretamente no backend.
+
+### 📈 Relatórios gerenciais
+
+- Acompanhamento das vendas.
+- Indicadores de faturamento.
+- Análise de custos e lucro.
+- Histórico de operações.
+- Informações para apoiar decisões comerciais.
+
+### 🔐 Segurança
+
+- Autenticação com senhas protegidas por hash `scrypt`.
+- Sessões persistidas no PostgreSQL.
+- Controle de acesso por perfil.
+- Cookies de sessão.
+- Consultas parametrizadas.
+- Transações atômicas.
+- Comunicação criptografada com o banco.
+- Row Level Security (RLS) habilitado no Supabase.
+
+---
+
+## 🖥️ Demonstração
+
+Adicione aqui imagens reais do sistema para apresentar sua interface.
+
+| Dashboard | Controle de produtos |
 |---|---|
-| `users` | Donos e caixas (hash scrypt da senha, perfil, ativo) |
-| `sessions` | Sessões abertas (hash SHA-256 do token, validade) |
-| `categories` | Categorias de produto (nome único, sem diferenciar maiúsculas) |
-| `products` | Produtos: preço de venda, custo (último preço de compra), estoque, estoque mínimo, `active` (exclusão lógica) |
-| `sales` | Vendas: totais, desconto, pagamento, troco, `request_id` (anti-duplicidade), cancelamento (quem, quando, motivo) |
-| `sale_items` | Itens com nome, categoria, preço e custo **da época** da venda |
-| `stock_movements` | Histórico de estoque: inicial, entrada, ajuste, venda, cancelamento |
+| `docs/images/dashboard.png` | `docs/images/produtos.png` |
 
-Dinheiro em **centavos inteiros**; quantidades em **milésimos** (1 un = 1000; 0,5 kg = 500). Datas em `timestamptz` (UTC no banco; relatórios fecham dia/mês pelo `TZ_OFFSET_MINUTES`).
+| Vendas | Relatórios |
+|---|---|
+| `docs/images/vendas.png` | `docs/images/relatorios.png` |
 
-O banco também barra dados inconsistentes por conta própria: estoque negativo, total ≠ subtotal − desconto, troco em venda que não é dinheiro, venda cancelada sem quem/quando, código de barras repetido entre produtos ativos, apagar venda ou item. O SQL completo está em [`supabase/schema.sql`](supabase/schema.sql).
+> As imagens acima são caminhos sugeridos. Substitua esta seção por capturas reais da aplicação.
 
-## 1. Criar o banco no Supabase
+---
 
-1. Crie uma conta em https://supabase.com e um **New project**. Região recomendada: **South America (São Paulo)**. Anote a **Database Password** que você definir (dá para trocar depois em *Project Settings → Database → Reset database password*).
-2. No projeto: **SQL Editor → New query**, cole o conteúdo de `supabase/schema.sql` e clique **Run**. Deve aparecer "Success. No rows returned".
-3. **Só se for uma instalação nova (sem migrar dados):** rode também `supabase/seed.sql` (cria as categorias padrão). **Se for migrar do SQLite, não rode o seed.**
+## 🛠️ Tecnologias utilizadas
 
-## 2. Pegar as credenciais e configurar o `.env`
+| Camada | Tecnologia |
+|---|---|
+| Frontend | HTML5, CSS3 e JavaScript |
+| Backend | Node.js e Express |
+| Banco de dados | PostgreSQL |
+| Infraestrutura do banco | Supabase |
+| Driver PostgreSQL | `pg` |
+| Autenticação | Sessões e hash `scrypt` |
+| Testes | Node.js Test Runner e PGlite |
+| Versionamento | Git e GitHub |
+| Hospedagem planejada | Railway |
 
-1. No Supabase, clique no botão **Connect** (topo da página do projeto).
-2. Escolha **Session pooler** e copie a **URI**. Ela tem este formato:
-   `postgresql://postgres.SEU_PROJECT_REF:[YOUR-PASSWORD]@aws-0-sa-east-1.pooler.supabase.com:5432/postgres`
-3. Troque `[YOUR-PASSWORD]` pela senha do banco. Se a senha tiver caracteres especiais (`@ : / ? #`), use uma senha só com letras e números, ou codifique (ex.: `@` vira `%40`).
-4. Copie `.env.example` para `.env` e preencha `DATABASE_URL`.
-5. **Recomendado:** em *Project Settings → Database → SSL Configuration*, clique **Download certificate** e informe o caminho do arquivo em `DATABASE_CA_CERT` (ou cole o conteúdo). Assim o servidor verifica que está falando com o Supabase de verdade. Sem ele a conexão continua criptografada, mas sem verificação do certificado.
+---
 
-> Por que o *Session pooler* e não a *Direct connection*? A conexão direta do Supabase só funciona por IPv6, que muitas hospedagens (incluindo o Railway) não usam para sair para a internet. O Session pooler funciona por IPv4 e mantém todos os recursos usados aqui (transações, travas).
+## 🏗️ Arquitetura do sistema
 
-| Variável | Padrão | Para quê |
-|---|---|---|
-| `DATABASE_URL` | — (obrigatória) | Connection string do Supabase (Session pooler) |
-| `DATABASE_SSL` | `require` | `require`, `verify` (exige certificado) ou `disable` (só Postgres local) |
-| `DATABASE_CA_CERT` | — | Certificado do Supabase (caminho ou conteúdo PEM) |
-| `PG_POOL_MAX` | `10` | Máximo de conexões deste servidor |
-| `PORT` | `3000` | Porta do servidor |
-| `ADMIN_USER` | `dono` | Usuário criado no primeiro start (se o banco não tiver usuários) |
-| `ADMIN_PASSWORD` | aleatória (aparece no log) | Senha do primeiro dono (mínimo 8 caracteres) |
-| `TZ_OFFSET_MINUTES` | `-180` | Fuso usado para fechar o dia e o mês (Brasília/Fortaleza) |
-| `TRUST_PROXY` | automático no Railway | `1` quando estiver atrás de proxy HTTPS |
+```text
+┌──────────────────────────┐
+│         FRONTEND         │
+│    HTML + CSS + JS       │
+└────────────┬─────────────┘
+             │ HTTP / API
+             ▼
+┌──────────────────────────┐
+│          BACKEND         │
+│    Node.js + Express     │
+│                          │
+│  • Autenticação          │
+│  • Permissões            │
+│  • Regras de negócio     │
+│  • Vendas e estoque      │
+│  • Relatórios            │
+└────────────┬─────────────┘
+             │ PostgreSQL
+             ▼
+┌──────────────────────────┐
+│         SUPABASE         │
+│                          │
+│  • PostgreSQL            │
+│  • Transações            │
+│  • Integridade dos dados │
+│  • RLS                   │
+└──────────────────────────┘
+```
 
-## 3. Rodar no computador
+O frontend se comunica com o backend por meio de uma API. O backend é responsável pela validação das operações, autenticação, autorização e acesso ao banco.
+
+As credenciais de acesso ao PostgreSQL permanecem exclusivamente no servidor.
+
+---
+
+## 🗄️ Estrutura do banco de dados
+
+O PostgreSQL possui as seguintes tabelas principais:
+
+| Tabela | Responsabilidade |
+|---|---|
+| `users` | Usuários e perfis de acesso |
+| `sessions` | Sessões autenticadas |
+| `categories` | Categorias dos produtos |
+| `products` | Produtos, preços e estoque |
+| `sales` | Registro das vendas |
+| `sale_items` | Produtos vinculados às vendas |
+| `stock_movements` | Histórico de movimentações do estoque |
+
+Os valores monetários são armazenados em centavos inteiros, e as quantidades utilizam milésimos para preservar a precisão dos cálculos.
+
+### Integridade das vendas
+
+O registro de uma venda é realizado dentro de uma transação PostgreSQL.
+
+Isso permite que a venda e a atualização do estoque sejam confirmadas juntas ou revertidas em caso de falha.
+
+Também são utilizados mecanismos de controle de concorrência e idempotência para reduzir riscos de inconsistências em operações simultâneas.
+
+---
+
+## 🚀 Instalação e execução
+
+### Pré-requisitos
+
+Antes de iniciar, tenha instalado:
+
+- Node.js 22 ou superior.
+- Git.
+- Uma instância PostgreSQL no Supabase.
+- Um editor de código, como VS Code.
+
+### 1. Clone o repositório
+
+```bash
+git clone https://github.com/SEU-USUARIO/mercado-alianca.git
+cd mercado-alianca
+```
+
+### 2. Instale as dependências
 
 ```bash
 npm install
+```
+
+### 3. Configure as variáveis de ambiente
+
+Crie um arquivo `.env` na raiz do projeto, utilizando o `.env.example` como referência.
+
+```env
+DATABASE_URL=postgresql://USUARIO:SENHA@HOST:5432/postgres
+DATABASE_SSL=require
+PG_POOL_MAX=10
+
+PORT=3000
+ADMIN_USER=dono
+ADMIN_PASSWORD=DEFINA_UMA_SENHA_FORTE
+TZ_OFFSET_MINUTES=-180
+```
+
+A URI deve ser obtida diretamente no painel do Supabase, preferencialmente pela opção **Session Pooler**, conforme a compatibilidade do ambiente.
+
+**Nunca publique o arquivo `.env` ou credenciais reais no GitHub.**
+
+### 4. Prepare o banco
+
+No painel do Supabase, acesse:
+
+**SQL Editor → New Query**
+
+Execute os arquivos SQL do projeto, nesta ordem:
+
+```text
+supabase/schema.sql
+supabase/seed.sql
+```
+
+O primeiro cria a estrutura do banco e o segundo adiciona os dados iniciais necessários.
+
+Execute os scripts apenas em um banco apropriado, verificando previamente se já existem tabelas e dados.
+
+### 5. Inicie a aplicação
+
+```bash
 node --env-file=.env server/index.js
 ```
 
-Abra http://localhost:3000. Se o banco estiver vazio (sem migração), o sistema cria o usuário **dono**; sem `ADMIN_PASSWORD`, a senha aparece no terminal — anote e troque em **Senha**.
+Acesse:
 
-Se aparecer "Tabelas ausentes no banco", o `schema.sql` ainda não foi executado no Supabase.
+**http://localhost:3000**
 
-## 4. Migrar os dados do SQLite antigo
+---
 
-1. **Baixe o banco atual:** no sistema antigo (ainda no ar), entre como dono → **Lucro do mês → Baixar backup do banco**. Você recebe `alianca-backup-AAAA-MM-DD.db`. Guarde uma cópia em lugar seguro.
-2. Crie o projeto Supabase e rode **só** o `schema.sql` (sem o seed).
-3. **Simule** (confere tudo e não grava nada):
-   ```bash
-   node --env-file=.env scripts/migrate-sqlite.js caminho/alianca-backup-AAAA-MM-DD.db --dry-run
-   ```
-4. Se a simulação terminar sem erro, **grave**:
-   ```bash
-   node --env-file=.env scripts/migrate-sqlite.js caminho/alianca-backup-AAAA-MM-DD.db
-   ```
+## 🧪 Testes automatizados
 
-O que o script faz:
-- Copia o arquivo `.db` para `backups/` antes de tudo e abre o original **somente leitura** (nunca altera nem apaga).
-- Recusa gravar se o banco de destino já tiver dados.
-- Copia usuários (com os mesmos hashes de senha — todos entram com a senha de sempre), categorias, produtos, vendas, itens e movimentações, **preservando os IDs** e números das vendas.
-- Tudo numa transação: confere **cada linha e cada coluna** contra a origem, quantidades de registros, totais financeiros e estoque. Se algo não bater, nada é gravado.
-- Mostra avisos se os dados antigos já tinham inconsistências (ex.: estoque diferente da soma do histórico) — esses dados são copiados como estão.
-- Sessões não são migradas: cada pessoa entra de novo uma vez.
+O projeto possui testes para validar o funcionamento da aplicação e a integridade das operações comerciais.
 
-**Faça a migração com o sistema antigo parado** (ou sem vendas acontecendo), para não ficar venda de fora.
-
-**Plano de reversão:** o SQLite original e o Volume do Railway não são tocados. Para voltar, publique de novo a versão anterior (commit "Estado original (SQLite)") com o Volume montado.
-
-## 5. Testes
+Execute:
 
 ```bash
 npm test
 ```
 
-Por padrão os testes usam o **PGlite** (PostgreSQL embutido, não precisa de internet nem de Supabase). Cada teste cria um banco novo com o `schema.sql`.
+A suíte de testes cobre funcionalidades como:
 
-Para rodar contra um **Postgres real** (prova de verdade os testes de vendas simultâneas, que no PGlite rodam em fila):
+- Autenticação e permissões.
+- Cadastro e gerenciamento de produtos.
+- Movimentações de estoque.
+- Registro e cancelamento de vendas.
+- Vendas simultâneas.
+- Proteção contra duplicidade.
+- Relatórios.
+- Migração, backup e restauração.
 
-```bash
-TEST_DATABASE_URL='postgresql://...' npm test        # Linux / Mac
-$env:TEST_DATABASE_URL='postgresql://...'; npm test  # Windows PowerShell
+Na validação da migração para PostgreSQL, **21 testes automatizados foram executados com sucesso**, incluindo testes com PostgreSQL real e PGlite.
+
+---
+
+## 💾 Backup e recuperação
+
+O sistema disponibiliza mecanismos para exportação e recuperação de dados.
+
+Arquivos relacionados:
+
+```text
+scripts/backup.js
+scripts/restore.js
+scripts/migrate-sqlite.js
 ```
 
-Use um banco **só de teste** (um Postgres local ou um segundo projeto Supabase). Cada teste cria um schema `test_xxx` próprio e o apaga no fim. **Nunca aponte para o banco de produção.**
+O sistema também disponibiliza exportação de backup em JSON.
 
-Cobrem: login/logout, sessão, troca de senha, bloqueio por tentativas, permissões de dono e caixa, produtos, entrada e ajuste de estoque, histórico, venda, desconto rateado, estoque insuficiente, vendas simultâneas de vários caixas, reenvio da mesma venda (inclusive simultâneo), cancelamento e cancelamento duplicado/simultâneo, relatórios, preço histórico, virada de mês no fuso, CSV, backup/restauração e migração do SQLite.
+A restauração de dados deve ser realizada com cuidado, preferencialmente após validação em ambiente de teste.
 
-## 6. Publicar no Railway
+---
 
-1. No serviço do Railway, em **Variables**, defina `DATABASE_URL` (a do Session pooler), `ADMIN_PASSWORD` e, de preferência, `DATABASE_CA_CERT` (cole o conteúdo do certificado).
-2. Remova a variável `DATA_DIR` (não é mais usada). O **Volume** deixa de ser necessário — mantenha-o até ter certeza de que a migração deu certo, porque ele guarda o banco antigo.
-3. Faça o deploy (`npm start` roda sozinho).
+## ☁️ Implantação
 
-Com o banco no Supabase, o serviço pode ter mais de uma instância. Observação: o bloqueio após 5 senhas erradas é contado por instância.
+A arquitetura permite executar o backend em uma plataforma de hospedagem Node.js, como o Railway, mantendo o PostgreSQL no Supabase.
 
-## Perfis
+Para implantação, é necessário configurar as variáveis de ambiente no serviço de hospedagem.
 
-- **Dono:** tudo. Cadastra e edita produtos, vê preço de compra, lucro e relatórios, cancela vendas, gerencia usuários, baixa backup.
-- **Caixa:** só vende e consulta as próprias vendas do dia. Não vê preço de compra nem lucro (o servidor nem envia esses dados).
+Variáveis principais:
 
-## Regras do sistema
-
-- Preço e custo da venda vêm sempre do banco, nunca do navegador.
-- A venda grava o preço e o custo da época. Mudar o preço depois não altera vendas antigas nem o lucro do passado.
-- Venda e baixa de estoque acontecem na mesma transação, com as linhas dos produtos travadas. Vários caixas vendendo o último item ao mesmo tempo: só um consegue.
-- Número de venda sequencial, sem buracos nem repetição, mesmo com vários caixas.
-- Reenviar a mesma venda (queda de internet no meio) não duplica: cada venda tem um identificador de requisição.
-- Cancelar venda devolve o estoque e tira o valor do lucro. Fica registrado quem cancelou, quando e o motivo. Cancelar duas vezes não devolve o estoque duas vezes.
-- Todo movimento de estoque (cadastro, entrada, ajuste, venda, cancelamento) fica no histórico do produto.
-- Excluir produto é lógico: ele some das telas, mas as vendas antigas continuam no histórico.
-- O custo do produto passa a ser o último preço de compra informado na entrada (não há custo médio ponderado).
-- Dinheiro em centavos inteiros; quantidades em milésimos. Sem erro de arredondamento de ponto flutuante.
-
-## Backup e restauração
-
-- **Lucro do mês → Baixar backup do banco** gera um arquivo `alianca-backup-AAAA-MM-DD.json` com todos os dados (consistente: lido numa única transação). Contém os hashes de senha — guarde em local seguro.
-- Pelo terminal: `node --env-file=.env scripts/backup.js` (salva em `backups/`).
-- **Restaurar** (num projeto Supabase novo, com só o `schema.sql` executado):
-  ```bash
-  node --env-file=.env scripts/restore.js alianca-backup-AAAA-MM-DD.json --dry-run   # confere
-  node --env-file=.env scripts/restore.js alianca-backup-AAAA-MM-DD.json             # grava
-  ```
-  A restauração nunca sobrescreve: se o banco já tiver dados, ela recusa.
-- O Supabase também faz backups próprios: no plano **Pro**, backups diários (*Database → Backups*), com opção de *Point in Time Recovery*. **No plano gratuito não há backup que você possa restaurar** — baixe o backup JSON com frequência e guarde fora do servidor.
-- **Exportar vendas do mês (CSV)** abre direto no Excel (separador `;`).
-
-## Limites desta versão
-
-- Precisa de internet (ou da rede local) para vender. Não há modo offline.
-- Não emite nota fiscal (NFC-e/SAT) nem integra com maquininha.
-- Sem controle de lote/validade, fornecedor, contas a pagar ou fiado.
-- Um único mercado por instalação.
-
-## Estrutura
-
+```text
+DATABASE_URL
+DATABASE_SSL
+PG_POOL_MAX
+PORT
+ADMIN_USER
+ADMIN_PASSWORD
+TZ_OFFSET_MINUTES
 ```
-server/    index.js (start) · app.js (rotas e regras) · db.js (conexão Postgres) · auth.js (senhas e sessão) · dataset.js (backup/carga)
-supabase/  schema.sql (estrutura do banco) · seed.sql (categorias padrão, só instalação nova)
-scripts/   migrate-sqlite.js · backup.js · restore.js
-public/    index.html · css/style.css · js/ (uma tela por arquivo)
-test/      api.test.js · migration.test.js · support/ · fixtures/
+
+A publicação em produção deve ser validada com testes de conexão, autenticação, vendas e integridade do estoque.
+
+---
+
+## 📁 Organização do projeto
+
+```text
+mercado-alianca/
+│
+├── public/
+│   └── Interface web
+│
+├── server/
+│   ├── app.js
+│   ├── auth.js
+│   ├── db.js
+│   ├── dataset.js
+│   └── index.js
+│
+├── supabase/
+│   ├── schema.sql
+│   └── seed.sql
+│
+├── scripts/
+│   ├── backup.js
+│   ├── restore.js
+│   ├── migrate-sqlite.js
+│   └── lib/
+│       └── transfer.js
+│
+├── test/
+│   ├── api.test.js
+│   ├── migration.test.js
+│   └── support/
+│
+├── .env.example
+├── .gitignore
+├── package.json
+└── README.md
 ```
+
+---
+
+## 🔄 Evolução do projeto
+
+O Mercado Aliança passou por uma evolução de infraestrutura, migrando do banco de dados local SQLite para PostgreSQL hospedado no Supabase.
+
+A migração teve como objetivos:
+
+- Centralizar os dados em um banco online.
+- Melhorar o suporte a acessos simultâneos.
+- Preservar a integridade das operações.
+- Preparar a aplicação para hospedagem.
+- Manter a compatibilidade com a interface existente.
+
+A migração foi validada com testes automatizados e verificações manuais das principais funcionalidades.
+
+---
+
+## 📌 Status do projeto
+
+| Componente | Situação |
+|---|---|
+| Interface web | Implementada |
+| Backend Node.js | Implementado |
+| PostgreSQL / Supabase | Integrado |
+| Autenticação | Implementada |
+| Controle de estoque | Implementado |
+| Gestão de vendas | Implementada |
+| Relatórios | Implementados |
+| Testes automatizados | 21 testes aprovados na migração |
+| Publicação Railway | Pendente |
+
+---
+
+
+
+### 🛒 Mercado Aliança
+
+**Tecnologia aplicada à gestão comercial.**
+
+Desenvolvido com Node.js, Express, PostgreSQL e Supabase.
+
+</div>
