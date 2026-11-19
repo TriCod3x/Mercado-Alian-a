@@ -630,7 +630,16 @@ function createApp({ db, tzOffsetMin = -180, now = () => Date.now(), trustProxy 
   app.get('/healthz', (req, res) => res.json({ ok: true }));
   app.use('/api', (req, res) => res.status(404).json({ error: 'Rota não encontrada.' }));
   if (publicDir) {
-    app.use(express.static(publicDir, { setHeaders: res => res.set('Cache-Control', 'no-cache') }));
+    app.use(express.static(publicDir, {
+      setHeaders: (res, file) => {
+        res.set('Cache-Control', 'no-cache');
+        if (file.endsWith('manifest.json')) res.type('application/manifest+json');
+        else if (file.endsWith('service-worker.js')) {
+          res.type('application/javascript');
+          res.set('Service-Worker-Allowed', '/');
+        }
+      },
+    }));
   }
   // eslint-disable-next-line no-unused-vars
   app.use((err, req, res, next) => {
