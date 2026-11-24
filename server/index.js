@@ -7,7 +7,7 @@ const { hashPassword } = require('./auth');
 
 const PORT = Number(process.env.PORT) || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
-const behindProxy = process.env.TRUST_PROXY === '1' || !!process.env.RAILWAY_ENVIRONMENT;
+const behindProxy = process.env.TRUST_PROXY === '1' || !!process.env.RAILWAY_ENVIRONMENT || !!process.env.RENDER;
 
 async function main() {
   const pool = createPool(process.env);
@@ -50,7 +50,21 @@ async function main() {
     console.log(`Banco de dados: PostgreSQL em ${new URL(process.env.DATABASE_URL).hostname}`);
   });
 
+  // Keep-alive: o Supabase (plano grátis) pausa o projeto após ~7 dias sem atividade.
+  // Uma consulta leve a cada KEEPALIVE_HOURS (padrão 12h) mantém o banco ativo. 0 desliga.
+  const keepaliveHours = process.env.KEEPALIVE_HOURS !== undefined ? Number(process.env.KEEPALIVE_HOURS) : 12;
+  let keepalive = null;
+  if (keepaliveHours > 0) {
+    keepalive = setInterval(() => {
+      db.query('SELECT COUNT(*) AS n FROM users')
+        .then(() => console.log(`Keep-alive Supabase ok (${new Date().toISOString()})`))
+        .catch(e => console.warn(`Keep-alive Supabase falhou: ${e.message}`));
+    }, keepaliveHours * 3600 * 1000);
+    keepalive.unref();
+  }
+
   function shutdown() {
+    if (keepalive) clearInterval(keepalive);
     server.close(() => { db.close().finally(() => process.exit(0)); });
     setTimeout(() => process.exit(1), 5000).unref();
   }

@@ -627,7 +627,11 @@ function createApp({ db, tzOffsetMin = -180, now = () => Date.now(), trustProxy 
   }));
 
   /* ---------- estáticos, 404 e erros ---------- */
-  app.get('/healthz', (req, res) => res.json({ ok: true }));
+  // Consulta o banco: um ping externo neste endereço mantém o host e o Supabase acordados.
+  app.get('/healthz', wrap(async (req, res) => {
+    await one('SELECT 1 AS ok');
+    res.json({ ok: true });
+  }));
   app.use('/api', (req, res) => res.status(404).json({ error: 'Rota não encontrada.' }));
   if (publicDir) {
     app.use(express.static(publicDir, {
