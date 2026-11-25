@@ -40,8 +40,10 @@ async function viewVenda(live) {
       <input id="q" type="search" placeholder="Buscar por nome ou ler código de barras…" autocomplete="off" value="${esc(App.q)}">
       <div id="plist" class="plist"></div>
     </section>
-    <section class="card cart"><h2>Venda atual</h2><div id="cart"></div></section>
+    <section class="card cart" id="cart-sec"><h2>Venda atual</h2><div id="cart"></div></section>
+    <div id="cartbar" class="cartbar"></div>
   </div>`;
+  watchCartVisibility();
   renderPList();
   renderCart();
 }
@@ -94,6 +96,7 @@ function renderCart() {
   App.cart = App.cart.filter(l => prodById(l.pid));
   if (!App.cart.length) {
     el.innerHTML = '<p class="empty">Carrinho vazio. Toque num produto (ou leia o código de barras) para adicionar.</p>';
+    renderCartBar();
     return;
   }
   el.innerHTML = `<div class="lines">${App.cart.map(l => {
@@ -115,6 +118,7 @@ function renderCart() {
 }
 
 function updateCartUI() {
+  renderCartBar();
   const root = $('#cart');
   if (!root || !App.cart.length) return;
   const c = cartCalc();
@@ -235,3 +239,25 @@ KEYDOWNS.push(e => {
   if (pick) { addToCart(pick.id); App.q = ''; e.target.value = ''; renderPList(); }
   return true;
 });
+
+/* Barra fixa no rodapé (só aparece no celular, pelo CSS): total + atalho para a venda. */
+let cartInView = false;
+let cartObs = null;
+function renderCartBar() {
+  const bar = $('#cartbar');
+  if (!bar) return;
+  const n = App.cart.length;
+  bar.closest('.pdv').classList.toggle('has-bar', n > 0);
+  if (!n || cartInView) { bar.innerHTML = ''; return; }
+  bar.innerHTML = `<div class="cb-info">${n} ${n === 1 ? 'item' : 'itens'}<b>${brl(cartCalc().total)}</b></div>
+    <button class="btn primary lg" data-act="go-cart">Ver venda</button>`;
+}
+function watchCartVisibility() {
+  if (cartObs) cartObs.disconnect();
+  cartInView = false;
+  const sec = $('#cart-sec');
+  if (!sec || !('IntersectionObserver' in window)) return;
+  cartObs = new IntersectionObserver(([e]) => { cartInView = e.isIntersecting; renderCartBar(); }, { threshold: 0.15 });
+  cartObs.observe(sec);
+}
+H['go-cart'] = () => { const s = $('#cart-sec'); if (s) s.scrollIntoView({ behavior: 'smooth', block: 'start' }); };

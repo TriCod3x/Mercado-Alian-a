@@ -8,7 +8,7 @@ async function viewUsuarios(live) {
   if (!live()) return;
   App.users = users;
   $('#app').innerHTML = `<div class="toolbar"><h2 style="margin:0;flex:1">Usuários</h2><button class="btn primary" data-act="u-new">+ Novo usuário</button></div>
-  <section class="card tblw"><table class="tbl"><thead><tr><th>Nome</th><th>Usuário</th><th>Perfil</th><th>Situação</th><th></th></tr></thead><tbody>
+  <section class="card tblw"><table class="tbl mob"><thead><tr><th>Nome</th><th>Usuário</th><th>Perfil</th><th>Situação</th><th></th></tr></thead><tbody>
   ${users.map(u => `<tr class="${u.active ? '' : 'canc'}"><td class="nm">${esc(u.name)}</td><td>${esc(u.username)}</td><td>${ROLE[u.role]}</td>
     <td>${u.active ? 'Ativo' : 'Desativado'}</td><td class="act"><button class="btn sm" data-act="u-edit" data-id="${u.id}">Editar</button></td></tr>`).join('')}
   </tbody></table></section>

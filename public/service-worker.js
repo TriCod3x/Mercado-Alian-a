@@ -2,7 +2,7 @@
 // ATENÇÃO: subir CACHE_NAME a cada deploy que mude assets do shell.
 // Só o "shell" (HTML/CSS/JS/ícones) é cacheado. /api/*, autenticação e qualquer
 // requisição não-GET ou de outra origem (ex.: Supabase) vão SEMPRE à rede.
-const CACHE_NAME = 'alianca-v1';
+const CACHE_NAME = 'alianca-v2';
 const OFFLINE_URL = '/offline.html';
 const SHELL = [
   '/', '/offline.html', '/manifest.json', '/css/style.css',

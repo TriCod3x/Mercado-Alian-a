@@ -16,6 +16,9 @@ function renderTabs() {
   const low = isOwner() ? lowCount() : 0;
   el.innerHTML = tabsFor(App.user).map(([k, l]) =>
     `<button class="tab${App.tab === k ? ' on' : ''}" data-act="tab" data-tab="${k}">${l}${k === 'estoque' && low ? `<i class="dot">${low}</i>` : ''}</button>`).join('');
+  // No celular as abas rolam de lado: mantém a aba atual à vista.
+  const on = el.querySelector('.tab.on');
+  if (on && el.scrollWidth > el.clientWidth) el.scrollLeft = on.offsetLeft - (el.clientWidth - on.offsetWidth) / 2;
 }
 
 function showLogin(msg) {
@@ -74,6 +77,17 @@ Object.assign(H, {
     showLogin();
   },
 });
+
+// No celular as tabelas ".tbl.mob" viram cartões: cada célula ganha o nome da coluna.
+function labelTables(root) {
+  root.querySelectorAll('.tbl.mob').forEach(t => {
+    const heads = [...t.querySelectorAll('thead th')].map(th => th.textContent.trim());
+    t.querySelectorAll('tbody tr').forEach(tr => {
+      [...tr.children].forEach((td, i) => { if (heads[i] && !td.dataset.label) td.dataset.label = heads[i]; });
+    });
+  });
+}
+new MutationObserver(() => labelTables(document)).observe(document.body, { childList: true, subtree: true });
 
 document.addEventListener('click', e => {
   const t = e.target.closest('[data-act]');

@@ -22,7 +22,7 @@ async function viewVendas(live) {
   $('#app').innerHTML = (owner ? monthBar() : '') + `<section class="card tblw">
     <h2>${owner ? `Vendas de ${esc(monthLabel(App.month))}` : 'Minhas vendas de hoje'}</h2>
     ${sales.length
-    ? `<table class="tbl"><thead><tr><th>Nº</th><th>Data</th>${owner ? '<th>Operador</th>' : ''}<th>Itens</th><th>Pgto</th><th class="r">Total</th>${owner ? '<th class="r">Lucro</th>' : ''}<th></th></tr></thead><tbody>${rows}</tbody></table>`
+    ? `<table class="tbl mob"><thead><tr><th>Nº</th><th>Data</th>${owner ? '<th>Operador</th>' : ''}<th>Itens</th><th>Pgto</th><th class="r">Total</th>${owner ? '<th class="r">Lucro</th>' : ''}<th></th></tr></thead><tbody>${rows}</tbody></table>`
     : `<p class="empty">${owner ? 'Nenhuma venda neste mês.' : 'Você ainda não fez vendas hoje.'}</p>`}</section>`;
 }
 

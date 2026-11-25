@@ -132,3 +132,85 @@ dialog::backdrop{background:rgba(0,0,0,.45)}
 .dfoot{display:flex;justify-content:flex-end;gap:8px;padding:12px 18px 16px}
 #toast{position:fixed;left:50%;bottom:calc(18px + env(safe-area-inset-bottom,0px));transform:translateX(-50%) translateY(20px);background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:10px;font-weight:600;font-size:14px;opacity:0;pointer-events:none;transition:.2s;z-index:50;max-width:calc(100% - 24px);text-align:center}
 #toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
+
+/* ===================== celular ===================== */
+.cartbar{display:none}
+@media (pointer:coarse){
+  .btn.sm{padding:8px 12px;font-size:14px}
+  .tab{padding:9px 14px}
+}
+@media (max-width:700px){
+  body{font-size:15px}
+  /* iOS dá zoom em campo com fonte < 16px */
+  input,select{font-size:16px}
+  main{padding:10px 10px calc(14px + env(safe-area-inset-bottom,0px))}
+  .card{padding:12px;border-radius:10px;margin-bottom:10px}
+
+  /* cabeçalho: marca + usuário na 1ª linha, abas roláveis na 2ª */
+  .top{gap:8px 10px;padding:8px 10px;padding-top:calc(8px + env(safe-area-inset-top,0px))}
+  .brand{font-size:16px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis}
+  .who{order:2;gap:6px}
+  .who>span{max-width:110px;overflow:hidden;text-overflow:ellipsis;font-size:14px}
+  .who small{display:none}
+  #tabs{order:3;flex:1 0 100%;flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;margin:0 -10px;padding:0 10px 2px;-webkit-overflow-scrolling:touch}
+  #tabs::-webkit-scrollbar{display:none}
+  .tab{flex:0 0 auto;white-space:nowrap}
+
+  /* barras de ferramentas: busca ocupa a linha toda */
+  .toolbar{gap:6px}
+  .toolbar input[type=search]{flex:1 0 100%}
+  .toolbar select{flex:1 1 140px}
+  .toolbar .btn{flex:1 1 auto;text-align:center}
+  .kpis{grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px}
+  .kpi{padding:10px 12px}
+  .kpi b{font-size:17px}
+  .row2{grid-template-columns:1fr}
+
+  /* tabelas grandes viram cartões */
+  .tbl.mob thead{display:none}
+  .tbl.mob,.tbl.mob tbody,.tbl.mob tr,.tbl.mob td{display:block;width:100%}
+  .tbl.mob tr{border-bottom:1px solid var(--line);padding:10px 0}
+  .tbl.mob tr:last-child{border-bottom:0}
+  .tbl.mob td{border:0;padding:3px 0;display:flex;justify-content:space-between;align-items:baseline;gap:12px;text-align:right;white-space:normal;max-width:none}
+  .tbl.mob td::before{content:attr(data-label);color:var(--mut);font-size:12.5px;font-weight:600;text-align:left;flex:0 0 auto}
+  .tbl.mob td.nm,.tbl.mob td.first{font-size:15.5px;text-align:left;display:block;min-width:0}
+  .tbl.mob td.nm::before,.tbl.mob td.first::before,.tbl.mob td.act::before{content:none}
+  .tbl.mob td.nm small{display:inline;margin-left:6px}
+  .tbl.mob td.sum-cell{overflow:visible;text-overflow:clip}
+  .tbl.mob td.act{display:flex;flex-wrap:wrap;justify-content:flex-start;gap:6px;padding-top:8px}
+  .tbl.mob td.act .btn{margin:0;flex:1 1 auto;text-align:center}
+  .card.tblw:has(.tbl.mob){padding-top:4px;padding-bottom:4px}
+
+  /* PDV */
+  .plist{max-height:none;overflow:visible}
+  .prow{padding:12px}
+  .line{grid-template-columns:1fr auto auto;grid-template-areas:"name name rm" "qty sub sub"}
+  .line .ln-name{grid-area:name}
+  .line .qty{grid-area:qty}
+  .line .ln-sub{grid-area:sub}
+  .line [data-act=rm]{grid-area:rm}
+  .qty .btn.sm{min-width:40px;padding:8px 0}
+  .qty input{width:70px}
+  label.srow input,label.srow select{width:140px}
+  .actions{position:sticky;bottom:0;background:var(--card);padding:8px 0 calc(4px + env(safe-area-inset-bottom,0px))}
+  .cartbar:not(:empty){display:flex;position:fixed;left:0;right:0;bottom:0;z-index:6;align-items:center;gap:10px;background:var(--card);border-top:1px solid var(--line);padding:10px 12px calc(10px + env(safe-area-inset-bottom,0px));box-shadow:0 -4px 14px rgba(0,0,0,.08)}
+  .cartbar .cb-info{flex:1;min-width:0;font-weight:600;line-height:1.2}
+  .cartbar .cb-info b{display:block;font-size:18px}
+  .pdv.has-bar{padding-bottom:72px}
+
+  /* relatório */
+  .mbar{gap:6px}
+  .mbar .lbl{order:-1;flex:1 0 100%;font-size:17px}
+  .mbar input{flex:1}
+  .bars{height:100px}
+  .crow{grid-template-columns:1fr auto auto;padding-bottom:8px;border-bottom:1px solid var(--line)}
+  .crow:last-of-type{border-bottom:0}
+  .crow>input{grid-column:1/-1}
+
+  /* diálogos ocupam a largura e os botões ficam fáceis de tocar */
+  dialog{width:calc(100% - 16px);max-height:calc(100% - 16px)}
+  .dbody{padding:16px 14px 6px}
+  .dfoot{padding:10px 14px 14px;flex-wrap:wrap}
+  .dfoot .btn{flex:1 1 auto;text-align:center}
+  .login-wrap{min-height:100dvh}
+}

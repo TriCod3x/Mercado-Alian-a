@@ -46,7 +46,7 @@ function renderStockTable() {
       <td class="act"><button class="btn sm" data-act="p-restock" data-id="${p.id}">+ Entrada</button><button class="btn sm" data-act="p-hist" data-id="${p.id}">Histórico</button><button class="btn sm" data-act="p-edit" data-id="${p.id}">Editar</button><button class="btn sm danger" data-act="p-del" data-id="${p.id}">Excluir</button></td></tr>`;
   }).join('');
   out.innerHTML = kpis + `<div class="card tblw">${list.length
-    ? `<table class="tbl"><thead><tr><th>Produto</th><th>Categoria</th><th class="r">Compra</th><th class="r">Venda</th><th class="r">Margem</th><th class="r">Estoque</th><th class="r">Valor (custo)</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
+    ? `<table class="tbl mob"><thead><tr><th>Produto</th><th>Categoria</th><th class="r">Compra</th><th class="r">Venda</th><th class="r">Margem</th><th class="r">Estoque</th><th class="r">Valor (custo)</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
     : '<p class="empty">Nenhum produto com esses filtros.</p>'}</div>`;
 }
 
@@ -135,7 +135,7 @@ async function historyDialog(id) {
   try {
     const { product, movements } = await api('GET', `/api/products/${id}/movements`);
     openDialog(`<div class="dbody"><h3>Histórico: ${esc(product.name)}</h3>
-      ${movements.length ? `<div class="tblw"><table class="tbl"><thead><tr><th>Quando</th><th>Tipo</th><th class="r">Qtd</th><th>Quem</th><th>Obs.</th></tr></thead><tbody>
+      ${movements.length ? `<div class="tblw"><table class="tbl mob"><thead><tr><th>Quando</th><th>Tipo</th><th class="r">Qtd</th><th>Quem</th><th>Obs.</th></tr></thead><tbody>
       ${movements.map(m => `<tr><td>${fmtDT(m.at)}</td><td>${MOVE[m.type] || esc(m.type)}${m.sale ? ` #${m.sale}` : ''}</td>
         <td class="r ${m.qty < 0 ? 'neg' : 'pos'}">${m.qty > 0 ? '+' : ''}${num(m.qty)} ${product.unit}</td><td>${esc(m.user || '')}</td><td>${esc(m.note || '')}</td></tr>`).join('')}
       </tbody></table></div>` : '<p class="empty">Sem movimentações.</p>'}</div>
